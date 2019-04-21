@@ -1,0 +1,13 @@
+[package]
+name = "refcounted"
+version = "0.1.0"
+authors = ["Nika Layzell <nika@thelayzells.com>"]
+edition = "2018"
+
+[workspace]
+members = ["refcounted-macros"]
+
+[dependencies]
+refcounted-macros = { path = "refcounted-macros" }
+
+
