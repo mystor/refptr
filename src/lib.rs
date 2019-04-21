@@ -1,21 +1,14 @@
-use std::cell::Cell;
 use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::ops::Deref;
-use std::process::abort;
 use std::ptr::NonNull;
-use std::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
-use std::sync::atomic::{self, AtomicUsize};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
 pub use refcounted_macros::refcounted;
 
-/// A soft limit on the amount of references that may be made to an AtomicRefcnt.
-///
-/// Going above this limit will abort your program (although not necessarily) at
-/// _exactly_ `MAX_REFCOUNT + 1` references.
-const MAX_REFCOUNT: usize = isize::max_value() as usize;
+/// Control block objects used by refcounted-macros.
+pub mod control;
 
 /// A reference counted pointer type for holding refcounted objects.
 pub struct RefPtr<T: ?Sized + Refcounted> {
@@ -63,6 +56,58 @@ unsafe impl<T: ?Sized + Refcounted + Sync + Send> Send for RefPtr<T> {}
 unsafe impl<T: ?Sized + Refcounted + Sync + Send> Sync for RefPtr<T> {}
 
 
+/// A reference counted pointer type for holding refcounted objects.
+pub struct WeakPtr<T: ?Sized + WeakRefcounted> {
+    ptr: NonNull<T>,
+    _marker: PhantomData<T>,
+}
+
+impl<T: ?Sized + WeakRefcounted> WeakPtr<T> {
+    pub fn new(val: &T) -> WeakPtr<T> {
+        unsafe {
+            val.weak_addref();
+
+            WeakPtr {
+                ptr: NonNull::new_unchecked(val as *const T as *mut T),
+                _marker: PhantomData,
+            }
+        }
+    }
+
+    pub fn upgrade(&self) -> Option<RefPtr<T>> {
+        unsafe {
+            if self.ptr.as_ref().upgrade() {
+                Some(RefPtr::dont_addref(self.ptr.as_ref()))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+impl<T: ?Sized + WeakRefcounted> Clone for WeakPtr<T> {
+    fn clone(&self) -> Self {
+        unsafe {
+            self.ptr.as_ref().weak_addref();
+        }
+
+        WeakPtr {
+            ptr: self.ptr,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T: ?Sized + WeakRefcounted> Drop for WeakPtr<T> {
+    fn drop(&mut self) {
+        unsafe { self.ptr.as_ref().weak_release() }
+    }
+}
+
+unsafe impl<T: ?Sized + WeakRefcounted + Sync + Send> Send for WeakPtr<T> {}
+unsafe impl<T: ?Sized + WeakRefcounted + Sync + Send> Sync for WeakPtr<T> {}
+
+
 /// The primary trait of this library. This trait is implemented by objects which
 /// are invasively reference counted. It has a few different constraints put upon
 /// those objects.
@@ -74,118 +119,33 @@ unsafe impl<T: ?Sized + Refcounted + Sync + Send> Sync for RefPtr<T> {}
 ///  * If the `addref` method has been called more times than the `release`
 ///    method, the object must not be dropped.
 pub unsafe trait Refcounted {
+    /// Increment the strong reference count for this object.
+    ///
+    /// This must only be called while the strong reference count is at least 1.
+    /// If only weak references only exist for this object, the `upgrade` method
+    /// must be used instead.
     unsafe fn addref(&self);
+
+    /// Decrement the strong reference count for this object.
     unsafe fn release(&self);
+
+    /// Unsafely drop all fields in this struct without freeing the corresponding
+    /// storage (e.g. when the strong refcount reaches 0, but the weak refcount
+    /// is still non-zero).
+    unsafe fn drop_fields(&self);
 }
 
-/// Atomic internal reference count.
-pub struct AtomicRefcnt {
-    val: AtomicUsize,
-}
 
-impl AtomicRefcnt {
-    /// Create a new `AtomicRefcnt`
-    ///
-    /// This method is unsafe to prevent creation of `Refcounted` types outside
-    /// of generated methods.
-    #[inline]
-    pub unsafe fn new() -> Self {
-        AtomicRefcnt {
-            val: AtomicUsize::new(0),
-        }
-    }
+pub unsafe trait WeakRefcounted: Refcounted {
+    /// Increment the weak reference count of this object.
+    unsafe fn weak_addref(&self);
 
-    #[inline]
-    pub fn get(&self) -> usize {
-        self.val.load(SeqCst)
-    }
+    /// Decrement the weak reference count of this object.
+    unsafe fn weak_release(&self);
 
-    #[inline]
-    pub unsafe fn inc(&self) {
-        // Using a relaxed ordering is OK here, as knowledge of an existing
-        // reference prevents other threads from erroneously deleting the object
-        // while we're incrementing.
-        //
-        // As we have a reference to `self`, we know there is a live reference
-        // to our containing object which this count is referring to.
-        //
-        // This is documented in more detail in the rustc source code for `Arc`.
-        let old_count = self.val.fetch_add(1, Relaxed);
-
-        // Guard against massive reference counts by aborting if you exceed
-        // `isize::MAX`.
-        if old_count > MAX_REFCOUNT {
-            abort();
-        }
-    }
-
-    #[inline]
-    pub unsafe fn dec(&self) -> bool {
-        // If we've decreased to a non-zero value, we can immediately return.
-        let old_count = self.val.fetch_sub(1, Release);
-        if old_count != 1 {
-            return false;
-        }
-
-        // We're about to drop the object in question due to the count reaching
-        // zero. As documented in the `Arc` implementation, we need to be sure
-        // that any other writes (e.g. in interior mutability) are visible to
-        // our thread before we release, so we need to perform an `Acquire`
-        // fence here.
-        atomic::fence(Acquire);
-        true
-    }
-}
-
-impl fmt::Debug for AtomicRefcnt {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("AtomicRefcnt")
-            .field(&self.get())
-            .finish()
-    }
-}
-
-/// Non-atomic internal reference count.
-pub struct Refcnt {
-    val: Cell<usize>,
-}
-
-impl Refcnt {
-    /// Create a new `Refcnt`
-    ///
-    /// This method is unsafe to prevent creation of `Refcounted` types outside
-    /// of generated methods.
-    #[inline]
-    pub unsafe fn new() -> Self {
-        Refcnt { val: Cell::new(0) }
-    }
-
-    #[inline]
-    pub fn get(&self) -> usize {
-        self.val.get()
-    }
-
-    #[inline]
-    pub unsafe fn inc(&self) {
-        if self.val.get() == usize::max_value() {
-            abort();
-        }
-        self.val.set(self.val.get() + 1);
-    }
-
-    #[inline]
-    pub unsafe fn dec(&self) -> bool {
-        self.val.set(self.val.get() - 1);
-        self.val.get() == 0
-    }
-}
-
-impl fmt::Debug for Refcnt {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Refcnt")
-            .field(&self.get())
-            .finish()
-    }
+    /// Attempt to obtain a new strong reference to this object. This method will
+    /// return `true` if the strong reference count was successfully incremented.
+    unsafe fn upgrade(&self) -> bool;
 }
 
 
