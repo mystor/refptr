@@ -25,11 +25,18 @@ struct MyAtomicWeak {
     bbb: u32,
 }
 
+#[refcounted(nonatomic, weak)]
+struct MyNonatomicWeak {
+    aaa: i32,
+    bbb: u32,
+}
+
 #[test]
 fn foo() {
     let _a: RefPtr<MyAtomic> = MyAtomic::alloc(5, 10);
     let _b: RefPtr<MyStruct> = MyStruct::alloc(5, 10);
     let _c: RefPtr<MyNonatomic> = MyNonatomic::alloc(5, 10);
     let _d: RefPtr<MyAtomicWeak> = MyAtomicWeak::alloc(5, 10);
+    let _d: RefPtr<MyNonatomicWeak> = MyNonatomicWeak::alloc(5, 10);
 }
 

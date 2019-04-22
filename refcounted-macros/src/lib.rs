@@ -79,8 +79,8 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
     let rc_field_ty: Type = match (cfg.rc_kind, cfg.weak_kind) {
         (RcKind::Nonatomic, WeakKind::NonWeak) => parse_quote!(::refcounted::control::Refcnt),
         (RcKind::Atomic, WeakKind::NonWeak) => parse_quote!(::refcounted::control::AtomicRefcnt),
+        (RcKind::Nonatomic, WeakKind::Weak) => parse_quote!(::refcounted::control::RefcntWeak),
         (RcKind::Atomic, WeakKind::Weak) => parse_quote!(::refcounted::control::AtomicRefcntWeak),
-        _ => panic!(),
     };
 
     // Add our _refcnt field, and extract the original fields
