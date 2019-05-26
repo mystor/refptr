@@ -1,0 +1,21 @@
+[package]
+name = "rcptr-macros"
+version = "0.1.0"
+authors = ["Nika Layzell <nika@thelayzells.com>"]
+edition = "2018"
+
+description = "Procedural macros for the 'rcptr' crate"
+repository = "https://github.com/mystor/rcptr"
+readme = "README.md"
+license = "MIT"
+keywords = ["macros", "refcounted", "arc", "rc"]
+
+include = ["src/**/*", "Cargo.toml", "README.md"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "0.15", features = ["full", "extra-traits"] }
+proc-macro2 = "0.4"
+quote = "0.6"

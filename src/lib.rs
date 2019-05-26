@@ -5,9 +5,9 @@ use std::ptr::NonNull;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
-pub use refcounted_macros::refcounted;
+pub use rcptr_macros::refcounted;
 
-/// Control block objects used by refcounted-macros.
+/// Control block objects used by rcptr-macros.
 pub mod control;
 
 /// A reference counted pointer type for holding refcounted objects.
@@ -101,6 +101,12 @@ impl<T: ?Sized + WeakRefcounted> Clone for WeakPtr<T> {
 impl<T: ?Sized + WeakRefcounted> Drop for WeakPtr<T> {
     fn drop(&mut self) {
         unsafe { self.ptr.as_ref().weak_release() }
+    }
+}
+
+impl<T: ?Sized + WeakRefcounted> fmt::Debug for WeakPtr<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "(WeakPtr)")
     }
 }
 

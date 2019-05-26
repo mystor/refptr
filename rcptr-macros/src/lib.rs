@@ -32,11 +32,13 @@ enum WeakKind {
 struct Config {
     rc_kind: RcKind,
     weak_kind: WeakKind,
+    has_finalize: bool,
 }
 
 fn parse_config(args: AttributeArgs) -> Result<Config, Error> {
     let mut rc_kind: Option<RcKind> = None;
     let mut weak_kind = WeakKind::NonWeak;
+    let mut has_finalize = false;
 
     for arg in args {
         match arg {
@@ -61,6 +63,12 @@ fn parse_config(args: AttributeArgs) -> Result<Config, Error> {
                         }
                         weak_kind = WeakKind::Weak;
                     }
+                    "finalize" => {
+                        if has_finalize {
+                            fail!(word, "duplicate finalize argument");
+                        }
+                        has_finalize = true;
+                    }
                     _ => fail!(word, "unexpected refcounted argument"),
                 }
             }
@@ -69,7 +77,7 @@ fn parse_config(args: AttributeArgs) -> Result<Config, Error> {
     }
 
     let rc_kind = rc_kind.unwrap_or(RcKind::Nonatomic);
-    Ok(Config { rc_kind, weak_kind })
+    Ok(Config { rc_kind, weak_kind, has_finalize })
 }
 
 fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStream, Error> {
@@ -77,10 +85,10 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
 
     let name = item.ident.clone();
     let rc_field_ty: Type = match (cfg.rc_kind, cfg.weak_kind) {
-        (RcKind::Nonatomic, WeakKind::NonWeak) => parse_quote!(::refcounted::control::Refcnt),
-        (RcKind::Atomic, WeakKind::NonWeak) => parse_quote!(::refcounted::control::AtomicRefcnt),
-        (RcKind::Nonatomic, WeakKind::Weak) => parse_quote!(::refcounted::control::RefcntWeak),
-        (RcKind::Atomic, WeakKind::Weak) => parse_quote!(::refcounted::control::AtomicRefcntWeak),
+        (RcKind::Nonatomic, WeakKind::NonWeak) => parse_quote!(::rcptr::control::Refcnt),
+        (RcKind::Atomic, WeakKind::NonWeak) => parse_quote!(::rcptr::control::AtomicRefcnt),
+        (RcKind::Nonatomic, WeakKind::Weak) => parse_quote!(::rcptr::control::RefcntWeak),
+        (RcKind::Atomic, WeakKind::Weak) => parse_quote!(::rcptr::control::AtomicRefcntWeak),
     };
 
     // Add our _refcnt field, and extract the original fields
@@ -112,8 +120,14 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
         }
     }).collect::<TokenStream>();
 
+    let maybe_finalize = if cfg.has_finalize {
+        quote!(self.finalize();)
+    } else {
+        quote!()
+    };
+
     let impl_refcounted = quote!{
-        unsafe impl #impl_generics ::refcounted::Refcounted for #name #ty_generics #where_clause {
+        unsafe impl #impl_generics ::rcptr::Refcounted for #name #ty_generics #where_clause {
             #[inline]
             unsafe fn addref(&self) {
                 self._refcnt.inc_strong();
@@ -126,6 +140,7 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
 
             #[inline]
             unsafe fn drop_fields(&self) {
+                #maybe_finalize
                 #drop_fields
             }
         }
@@ -133,7 +148,7 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
 
     let impl_weak = if cfg.weak_kind == WeakKind::Weak {
         quote!{
-            unsafe impl #impl_generics ::refcounted::WeakRefcounted for #name #ty_generics #where_clause {
+            unsafe impl #impl_generics ::rcptr::WeakRefcounted for #name #ty_generics #where_clause {
                 #[inline]
                 unsafe fn weak_addref(&self) {
                     self._refcnt.inc_weak();
@@ -168,13 +183,13 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
     let impl_alloc = quote!{
         impl #impl_generics #name #ty_generics #where_clause {
             #[inline]
-            fn alloc(#params) -> ::refcounted::RefPtr<Self> {
+            fn alloc(#params) -> ::rcptr::RefPtr<Self> {
                 let raw = Box::into_raw(Box::new(#name {
                     _refcnt: unsafe { #rc_field_ty::new() },
                     #inits
                 }));
 
-                unsafe { ::refcounted::RefPtr::dont_addref(&*raw) }
+                unsafe { ::rcptr::RefPtr::dont_addref(&*raw) }
             }
         }
     };

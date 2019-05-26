@@ -1,13 +1,11 @@
 [package]
-name = "refcounted"
+name = "rcptr"
 version = "0.1.0"
 authors = ["Nika Layzell <nika@thelayzells.com>"]
 edition = "2018"
 
 [workspace]
-members = ["refcounted-macros"]
+members = ["rcptr-macros"]
 
 [dependencies]
-refcounted-macros = { path = "refcounted-macros" }
-
-
+rcptr-macros = { version = "0.1.0", path = "rcptr-macros" }
