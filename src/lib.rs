@@ -4,29 +4,47 @@ use std::ops::Deref;
 use std::ptr::NonNull;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::mem;
 
 pub use rcptr_macros::refcounted;
 
-/// Control block objects used by rcptr-macros.
 pub mod control;
 
-/// A reference counted pointer type for holding refcounted objects.
+/// Smart pointer for holding [`Refcounted`] objects.
 pub struct RefPtr<T: ?Sized + Refcounted> {
     ptr: NonNull<T>,
     _marker: PhantomData<T>,
 }
 
 impl<T: ?Sized + Refcounted> RefPtr<T> {
+    /// Acquire a strong reference to the passed-in object.
     pub fn new(val: &T) -> RefPtr<T> {
         unsafe {
             val.addref();
-            RefPtr::dont_addref(val)
+            RefPtr::from_raw(val)
         }
     }
 
-    pub unsafe fn dont_addref(val: &T) -> RefPtr<T> {
+    /// Consumes the `RefPtr`, returning the wrapped pointer.
+    ///
+    /// To avoid a leak, the pointer must be turned back into an `RefPtr` using
+    /// [`RefPtr::from_raw`].
+    pub fn into_raw(this: RefPtr<T>) -> *const T {
+        let ptr = this.ptr.as_ptr();
+        mem::forget(this);
+        ptr
+    }
+
+    /// Constructs a `RefPtr` from this pointer.
+    ///
+    /// The raw pointer must have been returned from `RefPtr::into_raw`.
+    ///
+    /// This function is unsafe because improper use may lead to memory
+    /// problems. For example, a double-free may occur if the function is called
+    /// twice on the same raw pointer.
+    pub unsafe fn from_raw(raw: *const T) -> RefPtr<T> {
         RefPtr {
-            ptr: NonNull::new_unchecked(val as *const T as *mut T),
+            ptr: NonNull::new_unchecked(raw as *mut T),
             _marker: PhantomData,
         }
     }
@@ -48,7 +66,10 @@ impl<T: ?Sized + Refcounted> Deref for RefPtr<T> {
 
 impl<T: ?Sized + Refcounted> Drop for RefPtr<T> {
     fn drop(&mut self) {
-        unsafe { self.release() }
+        unsafe {
+            let action = self.ptr.as_ref().release();
+            action.take_action(self.ptr);
+        }
     }
 }
 
@@ -68,7 +89,7 @@ impl<T: ?Sized + WeakRefcounted> WeakPtr<T> {
             val.weak_addref();
 
             WeakPtr {
-                ptr: NonNull::new_unchecked(val as *const T as *mut T),
+                ptr: val.into(),
                 _marker: PhantomData,
             }
         }
@@ -76,11 +97,8 @@ impl<T: ?Sized + WeakRefcounted> WeakPtr<T> {
 
     pub fn upgrade(&self) -> Option<RefPtr<T>> {
         unsafe {
-            if self.ptr.as_ref().upgrade() {
-                Some(RefPtr::dont_addref(self.ptr.as_ref()))
-            } else {
-                None
-            }
+            let action = self.ptr.as_ref().upgrade();
+            action.take_action(self.ptr)
         }
     }
 }
@@ -100,7 +118,10 @@ impl<T: ?Sized + WeakRefcounted> Clone for WeakPtr<T> {
 
 impl<T: ?Sized + WeakRefcounted> Drop for WeakPtr<T> {
     fn drop(&mut self) {
-        unsafe { self.ptr.as_ref().weak_release() }
+        unsafe {
+            let action = self.ptr.as_ref().weak_release();
+            action.take_action(self.ptr);
+        }
     }
 }
 
@@ -133,25 +154,20 @@ pub unsafe trait Refcounted {
     unsafe fn addref(&self);
 
     /// Decrement the strong reference count for this object.
-    unsafe fn release(&self);
-
-    /// Unsafely drop all fields in this struct without freeing the corresponding
-    /// storage (e.g. when the strong refcount reaches 0, but the weak refcount
-    /// is still non-zero).
-    unsafe fn drop_fields(&self);
+    unsafe fn release(&self) -> control::FreeAction;
 }
-
 
 pub unsafe trait WeakRefcounted: Refcounted {
     /// Increment the weak reference count of this object.
     unsafe fn weak_addref(&self);
 
     /// Decrement the weak reference count of this object.
-    unsafe fn weak_release(&self);
+    unsafe fn weak_release(&self) -> control::FreeAction;
 
-    /// Attempt to obtain a new strong reference to this object. This method will
-    /// return `true` if the strong reference count was successfully incremented.
-    unsafe fn upgrade(&self) -> bool;
+    /// Attempt to obtain a new strong reference to this object. This method
+    /// will return `UpgradeAction::Upgrade` if the strong reference count was
+    /// successfully incremented.
+    unsafe fn upgrade(&self) -> control::UpgradeAction;
 }
 
 

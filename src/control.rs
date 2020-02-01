@@ -6,21 +6,42 @@ use std::cell::Cell;
 use std::fmt;
 use std::mem::ManuallyDrop;
 use std::process::abort;
-use std::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
 use std::sync::atomic::{self, AtomicUsize, Ordering};
+use std::marker::PhantomData;
+use std::sync::Arc;
+use std::rc::Rc;
+use std::ptr::NonNull;
+use crate::{RefPtr, Refcounted};
 
-use radium::RadiumUsize;
-
-use crate::Refcounted;
-
-/// A soft limit on the amount of references that may be made to an AtomicRefcnt.
+/// A soft limit on the amount of references that may be made to an
+/// AtomicRefcnt.
 ///
 /// Going above this limit will abort your program (although not necessarily) at
 /// _exactly_ `MAX_REFCOUNT + 1` references.
 const MAX_REFCOUNT: usize = isize::max_value() as usize;
 
+#[must_use]
+#[derive(Eq, PartialEq, Debug)]
+pub enum UpgradeAction {
+    /// The caller should take no action.
+    None,
 
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+    /// The caller has acquired a strong reference to the object's backing
+    /// memory.
+    Upgrade,
+}
+
+impl UpgradeAction {
+    pub unsafe fn take_action<T: ?Sized + Refcounted>(self, ptr: NonNull<T>) -> Option<RefPtr<T>> {
+        match self {
+            UpgradeAction::None => None,
+            UpgradeAction::Upgrade => Some(RefPtr::from_raw(ptr.as_ptr())),
+        }
+    }
+}
+
+#[must_use]
+#[derive(Eq, PartialEq, Debug)]
 pub enum FreeAction {
     /// The caller should take no action.
     None,
@@ -31,105 +52,159 @@ pub enum FreeAction {
 }
 
 impl FreeAction {
-    unsafe fn take_action<T>(self, ptr: NotNull<T>) {
+    pub unsafe fn take_action<T: ?Sized>(self, ptr: NonNull<T>) {
         match self {
             FreeAction::None => {}
             FreeAction::FreeMemory => {
                 // Unsafely drop the value stored in `ptr`.
-                Box::from_raw(ptr.cast::<ManuallyDrop<T>>().as_ptr());
+                Box::from_raw(ptr.as_ptr() as *mut ManuallyDrop<T>);
             }
         }
     }
 }
 
+macro_rules! decl_control {
+    ($name:ident, $atomic:ident, [$strong:ty $(, $weak:ty)?]) => {
+        pub struct $name<T: ?Sized> {
+            inner: RefcntImpl<$strong $(, $weak)?>,
+            /// This marker is required to limit the type to only be `Sync` if
+            /// it is also `Send`, as otherwise we could pass a non-`Send` `&T`
+            /// to another thread, acquire a reference, and drop it there.
+            _marker: PhantomData<$atomic<T>>,
+        }
 
-/// Helper method for doing CAS loops. Takes in a method and store/load
-/// orderings. Will perform a CAS loop, invoking `f` each time to determine the
-/// new value to set.
-///
-/// If `f` returns `None`, this method will return.
-///
-/// Returns the old value and the new value which replaced it, or `None`.
-fn fetch_update<T: RadiumUsize, F>(
-    v: &T,
-    store_order: Ordering,
-    load_order: Ordering,
-    f: F,
-) -> Result<usize, usize>
-where
-    F: FnMut(usize) -> Option<usize>,
-{
-    let mut prev = v.load(load_order);
-    while let Some(next) = f(prev) {
-        match v.compare_exchange_weak(prev, next, store_order, load_order) {
-            Ok(_) => return Ok(prev)
-            Err(actual) => prev = actual,
+        impl<T: ?Sized> $name<T> {
+            /// Create a new control block, initialized to a strong (and weak,
+            /// if applicable), reference count of `1`.
+            pub unsafe fn new() -> Self {
+                $name {
+                    inner: RefcntImpl::new(),
+                    _marker: PhantomData,
+                }
+            }
+
+            /// Increment the allocation's strong reference count.
+            pub unsafe fn inc_strong(&self) {
+                self.inner.inc_strong()
+            }
+
+            /// Decrement the allocation's strong reference count, potentially
+            /// dropping fields.
+            ///
+            /// Use of this method is more efficient than `dec_strong_finalize`,
+            /// but does not provide an opportunity for finalization.
+            ///
+            /// Callers of this method should free the underlying memory if
+            /// a `FreeAction::FreeMemory` action is returned.
+            pub unsafe fn dec_strong(
+                &self,
+                drop_fields: impl FnOnce(),
+            ) -> FreeAction {
+                self.inner.dec_strong(drop_fields)
+            }
+
+            /// Decrement the allocation's strong reference count, potentially
+            /// running a finalizer and dropping fields.
+            ///
+            /// The finalizer may be called multiple times during an object's
+            /// lifetime.
+            ///
+            /// Callers of this method should free the underlying memory if
+            /// a `FreeAction::FreeMemory` action is returned.
+            pub unsafe fn dec_strong_finalize(
+                &self,
+                drop_fields: impl FnOnce(),
+                finalize: impl FnOnce(),
+            ) -> FreeAction {
+                self.inner.dec_strong_finalize(drop_fields, finalize)
+            }
+
+            /// Gets the number of strong references to this allocation.
+            pub fn strong_count(&self) -> usize {
+                self.inner.strong_count()
+            }
+
+            $(
+                /// Gets the number of weak references to this allocation.
+                ///
+                /// If there are no remaining strong references, this will
+                /// return `0`.
+                pub fn weak_count(&self) -> usize {
+                    self.inner.weak_count()
+                }
+
+                /// Increment the allocation's weak reference count.
+                pub unsafe fn inc_weak(&self) {
+                    type _Ignore = $weak;
+                    self.inner.inc_weak()
+                }
+
+                /// Decrement the allocation's weak reference count.
+                ///
+                /// Callers of this method should free the underlying memory if
+                /// a `FreeAction::FreeMemory` action is returned.
+                pub unsafe fn dec_weak(&self) -> FreeAction {
+                    self.inner.dec_weak()
+                }
+
+                /// Attempt to upgrade a weak reference to a strong reference by
+                /// incrementing the strong reference count.
+                ///
+                /// If this method returns `true`, the upgrade was successful,
+                /// and if it returns `false`, the strong reference count has
+                /// already reached `0`, and fields have been dropped.
+                pub unsafe fn upgrade(&self) -> UpgradeAction {
+                    self.inner.upgrade()
+                }
+            )?
+        }
+
+        impl<T: ?Sized> fmt::Debug for $name<T> {
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.debug_struct(stringify!($name))
+                    .field("strong", &self.strong_count())
+                    $(
+                        .field("weak", {
+                            type _Ignore = $weak;
+                            &self.weak_count()
+                        })
+                    )?
+                    .finish()
+            }
         }
     }
-    Err(prev)
 }
 
+decl_control!(Refcnt, Rc, [Cell<usize>]);
+decl_control!(RefcntWeak, Rc, [Cell<usize>, Cell<usize>]);
+decl_control!(AtomicRefcnt, Arc, [AtomicUsize]);
+decl_control!(AtomicRefcntWeak, Arc, [AtomicUsize, AtomicUsize]);
 
-pub trait OptionalWeakRefcnt<T: RadiumUsize> {
+/// Internal trait for abstracting over `AtomicUsize`, `Cell<usize>`, and `()`.
+///
+/// Not for external use.
+trait IncDecCount {
     fn new() -> Self;
-    fn dec_weak(&self) -> usize;
-    fn inc_weak(&self) -> usize;
+    fn load(&self) -> usize;
+    fn dec(&self) -> usize;
+    fn inc(&self) -> usize;
+    fn fence(order: Ordering);
 }
 
-/// Dummy WeakRefCnt implementation for types without a weak count.
-impl<T: RadiumUsize> OptionalWeakRefcnt<T> for () {
+impl IncDecCount for AtomicUsize {
     fn new() -> Self {
-        ()
+        AtomicUsize::new(1)
     }
 
-    fn dec_weak(&self) -> usize {
-        1
+    fn load(&self) -> usize {
+        self.load(Ordering::SeqCst)
     }
 
-    fn inc_weak(&self) -> usize {
-        1
-    }
-}
-
-impl<T: RadiumUsize> OptionalWeakRefcnt<T> for T {
-    fn new() -> Self {
-        <Self as RadiumUsize>::new(1)
+    fn dec(&self) -> usize {
+        self.fetch_sub(1, Ordering::Release)
     }
 
-    fn dec_weak(&self) -> usize {
-        self.fetch_sub(1, Release)
-    }
-
-    fn inc_weak(&self) -> usize {
-        // See the documentation for inc_strong for more details on why this is
-        // OK to be `Relaxed`.
-        let old = self.fetch_add(1, Relaxed);
-        if old > MAX_REFCOUNT - 1 {
-            abort();
-        }
-        old
-    }
-}
-
-
-pub struct Refcnt<T, W> {
-    strong: T,
-    weak: W,
-}
-
-impl<T, W> Refcnt<T, W>
-where
-    T: RadiumUsize,
-    W: OptionalWeakRefcnt<T>,
-{
-    unsafe fn new() -> Self {
-        Refcnt {
-            strong: T::new(1),
-            weak: W::new(),
-        }
-    }
-
-    unsafe fn addref(&self) {
+    fn inc(&self) -> usize {
         // Using a relaxed ordering is OK here, as knowledge of an existing
         // reference prevents other threads from erroneously deleting the object
         // while we're incrementing.
@@ -138,18 +213,100 @@ where
         // to our containing object which this count is referring to.
         //
         // This is documented in more detail in the rustc source code for `Arc`.
-        let old_count = self.strong.fetch_add(1, Relaxed);
+        let prev = self.fetch_add(1, Ordering::Relaxed);
 
-        // Guard against massive reference counts by aborting if you exceed
-        // `isize::MAX`.
-        if old_count > MAX_REFCOUNT {
+        // Guard against excessively-large reference counts.
+        if prev > MAX_REFCOUNT - 1 {
             abort();
+        }
+        prev
+    }
+
+    fn fence(order: Ordering) {
+        atomic::fence(order)
+    }
+}
+
+impl IncDecCount for Cell<usize> {
+    fn new() -> Self {
+        Cell::new(1)
+    }
+
+    fn load(&self) -> usize {
+        self.get()
+    }
+
+    fn dec(&self) -> usize {
+        let prev = self.get();
+        self.set(prev - 1);
+        prev
+    }
+
+    fn inc(&self) -> usize {
+        let prev = self.get();
+
+        // Guard against excessively-large reference counts.
+        if prev > MAX_REFCOUNT - 1 {
+            abort();
+        }
+        self.set(prev + 1);
+        prev
+    }
+
+    fn fence(_: Ordering) {}
+}
+
+/// NOTE: This impl should only be used for weak counts, as it doesn't make
+/// sense for strong counts.
+impl IncDecCount for () {
+    fn new() -> Self {
+        ()
+    }
+    fn load(&self) -> usize { unreachable!() }
+    fn dec(&self) -> usize { 1 }
+    fn inc(&self) -> usize { unreachable!() }
+    fn fence(_: Ordering) { unreachable!() }
+}
+
+struct RefcntImpl<T, W = ()> {
+    strong: T,
+    weak: W,
+}
+
+impl<T: IncDecCount, W: IncDecCount> RefcntImpl<T, W> {
+    unsafe fn new() -> Self {
+        RefcntImpl {
+            strong: T::new(),
+            weak: W::new(),
         }
     }
 
-    unsafe fn release<C: RefcntCallbacks>(&self, ptr: &C) -> FreeAction {
+    fn strong_count(&self) -> usize {
+        self.strong.load()
+    }
+
+    fn weak_count(&self) -> usize {
+        let weak = self.weak.load();
+        let strong = self.strong.load();
+        if strong == 0 {
+            // std::sync::Arc returns `0` for `weak_count` when the strong count
+            // has reached `0`. That behaviour is copied here.
+            0
+        } else {
+            // We loaded the strong count after the weak count. As there is a
+            // strong reference, we know the implicit weak reference is present,
+            // and can subtract it from our loaded `weak` value.
+            weak - 1
+        }
+    }
+
+    unsafe fn inc_strong(&self) {
+        self.strong.inc();
+    }
+
+    unsafe fn dec_strong(&self, drop_fields: impl FnOnce()) -> FreeAction {
         // If we've decreased to a non-zero value, we can immediately return.
-        let old_count = self.strong.fetch_sub(1, Release);
+        let old_count = self.strong.dec();
         if old_count != 1 {
             return FreeAction::None;
         }
@@ -159,37 +316,66 @@ where
         // that any other writes (e.g. in interior mutability) are visible to
         // our thread before we release, so we need to perform an `Acquire`
         // fence here.
-        atomic::fence(Acquire);
+        T::fence(Ordering::Acquire);
 
         // Drop any remaining fields, and then drop our self-weak-reference,
         // which may cause the backing storage to also be freed.
         //
         // PANIC NOTE: If `drop_fields` panics, the weak reference will never be
         // freed, and the backing allocation will leak.
-        ptr.drop_fields();
-        self.release_weak(ptr)
+        drop_fields();
+        self.dec_weak()
     }
 
-    /// Increment the weak reference count.
-    unsafe fn addref_weak(&self) {
-        self.weak.inc_weak();
+    unsafe fn inc_weak(&self) {
+        self.weak.inc();
     }
 
-    /// Decrement the weak reference count. If it reaches zero, free the corresponding memory
-    /// fields, which may already be uninitialized.
-    unsafe fn release_weak<C>(&self, ptr: &C) -> FreeAction {
-        if self.weak.dec_weak() == 1 {
+    unsafe fn dec_weak(&self) -> FreeAction {
+        if self.weak.dec() == 1 {
             FreeAction::FreeMemory
         } else {
             FreeAction::None
         }
     }
+}
 
+impl RefcntImpl<AtomicUsize, ()> {
+    unsafe fn dec_strong_finalize(
+        &self,
+        drop_fields: impl FnOnce(),
+        finalize: impl FnOnce(),
+    ) -> FreeAction {
+        // As there are no weak pointers, it's OK to decrement our refcount to
+        // `0`, so long as we increment it back to `1` before finalization.
+        let old_count = self.strong.fetch_sub(1, Ordering::Release);
+        if old_count != 1 {
+            return FreeAction::None;
+        }
+
+        // We are the last remaining reference to the object. Stabilize the
+        // refcount to `1` to invoke `finalize`. The `Acquire` load will ensure
+        // writes from other threads are visible during the finalizer.
+        let acq = self.strong.fetch_add(1, Ordering::Acquire);
+        debug_assert!(acq == 0, "no other references exist");
+
+        // PANIC: If `finalize` panics, memory controlled by this operation will
+        // be leaked.
+        finalize();
+
+        // We've already finalized, so can drop our reference like normal.
+        // Use the standard codepath, as `finalize` may have acquired a new
+        // reference.
+        self.dec_strong(drop_fields)
+    }
+}
+
+impl RefcntImpl<AtomicUsize, AtomicUsize> {
     /// Attempt to upgrade a weak reference to a strong reference by
     /// incrementing the strong reference count. If this method returns `true`,
     /// the upgrade was successful, and if it returns `false`, the strong
     /// reference count has reached `0`, and the object has been destroyed.
-    unsafe fn upgrade(&self) -> bool {
+    unsafe fn upgrade(&self) -> UpgradeAction {
         // We use a CAS loop to increment the strong count instead of a
         // fetch_add because once the count hits 0 it must never be above 0.
 
@@ -198,577 +384,120 @@ where
         // and any other value is confirmed via the CAS.
         //
         // Relaxed is valid for the store for the same reason it is on `addref`.
-        fetch_update(self.strong, Relaxed, Relaxed, |count| {
-            if count == 0 {
-                return None;
-            }
-
-            // Guard against massive reference counts by aborting if it would
-            // exceed `isize::MAX`.
-            if count > MAX_REFCOUNT - 1 {
+        let mut prev = self.strong.load(Ordering::Relaxed);
+        while prev != 0 {
+            if prev > MAX_REFCOUNT - 1 {
                 abort();
             }
 
-            Some(count + 1)
-        })
-        .is_ok()
-    }
-}
-
-pub trait RefcntCallbacks {
-    fn call_finalize(&self) {}
-    unsafe fn drop_fields(&self);
-}
-
-
-pub struct FinalizingRefcnt<T: RadiumUsize, W: OptionalWeakRefcnt> {
-    strong: T,
-    weak: W,
-}
-
-impl<T, W> FinalizingRefcnt<T, W>
-where
-    T: RadiumUsize,
-    W: OptionalWeakRefcnt,
-{
-    unsafe fn new() -> Self {
-        Refcnt {
-            strong: T::new(1),
-            weak: W::new(),
-        }
-    }
-
-    unsafe fn addref(&self) {
-        // Using a relaxed ordering is OK here, as knowledge of an existing
-        // reference prevents other threads from erroneously deleting the object
-        // while we're incrementing.
-        //
-        // As we have a reference to `self`, we know there is a live reference
-        // to our containing object which this count is referring to.
-        //
-        // This is documented in more detail in the rustc source code for `Arc`.
-        let old_count = self.strong.fetch_add(1, Relaxed);
-
-        // Guard against massive reference counts by aborting if you exceed
-        // `isize::MAX`.
-        if old_count > MAX_REFCOUNT {
-            abort();
-        }
-    }
-
-    unsafe fn release<C: RefcntCallbacks>(&self, ptr: &C) {
-        // NOTE: I was unable to come up with a way to perform finalization in
-        // the presence of atomic weak pointers without replacing the release
-        // edge entirely with a potentially-super-slow CAS loop. This is far
-        // from the finest code I have ever written, but hopefully it's OK.
-        //
-        // This can be written much shorter in a non-concurrent context, but
-        // it'll probably all be optimized away anyways.
-
-        let old_count = fetch_update(&self.strong, Release, Relaxed, |count| {
-            // Try to perform a single decrement if we wouldn't be reaching a
-            // refcount of 0.
-            if count != 1 {
-                return Some(count - 1);
+            match self.strong.compare_exchange_weak(prev, prev + 1, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return UpgradeAction::Upgrade,
+                Err(actual) => prev = actual,
             }
-
-            // Now it's time to be gross. We can't decrement our reference count
-            // to 0 until after we've finalized, as the finalize step may
-            // acquire new references, either directly or through a weak pointer
-            // upgrade.
-            //
-            // Instead, we invoke `finalize` in this loop, and attempt to clear
-            // our refcount to `0` after that returns.
-            //
-            // Nothing prevents `finalize` from being invoked multiple times on
-            // an object, including being invoked multiple times by the same
-            // `release` operation.
-            //
-            // We perform an `Acquire` fence here to ensure writes from other
-            // threads are visible in `finalize`.
-            T::fence(Ordering::Acquire);
-
-            // PANIC NOTE: This call can panic. If it does, the reference count
-            // will not be decremented, and associated memory will be leaked.
-            //
-            // Weak pointers to objects which have had their finalizer panic
-            // will continue to be upgradeable.
-            //
-            // Don't panic during `finalize` - it will cause leaks.
-            ptr.call_finalize();
-
-            Some(0)
-        }).unwrap_or_else(|x| x);
-
-        if old_count != 1 {
-            return;
         }
+        UpgradeAction::None
+    }
 
-        // If we've reached this point, our reference count is officially `0`,
-        // and it's our job to clean up. This `Acquire` fence is used to ensure
-        // that any changes which may have occurred during the `finalize` call
-        // are visible to field destructors.
-        T::fence(Ordering::Acquire);
-
-        // PANIC NOTE: Dropping fields can panic. If it does, the weak reference
-        // count will not be decremented, and associated memory will be leaked.
+    unsafe fn dec_strong_finalize(
+        &self,
+        drop_fields: impl FnOnce(),
+        finalize: impl FnOnce(),
+    ) -> FreeAction {
+        // We cannot drop our strong refcount to `0` until after finalization,
+        // as otherwise `upgrade` could observe a `0` strong refcount when the
+        // object is not yet dead.
         //
-        // Don't panic during `drop` - it will cause leaks.
-        unsafe {
-            ptr.drop_fields()
+        // Do a manual compare_exchange loop before we begin finalizing.
+        let mut old_count = self.strong.load(Ordering::Relaxed);
+        while old_count != 1 {
+            match self.strong.compare_exchange_weak(
+                old_count,
+                old_count - 1,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return FreeAction::None,
+                Err(actual) => old_count = actual,
+            }
         }
+
+        debug_assert!(old_count == 1);
+
+        // We've observed that, at least for a moment, we were the last
+        // remaining strong reference. It is possible that weak references can
+        // be upgraded, or new pointers created, while `finalize` is being
+        // called.
+        //
+        // We perform an `Acquire` fence here to ensure writes from other
+        // threads are visible in `finalize`.
+        atomic::fence(Ordering::Acquire);
+
+        // PANIC: If `finalize` panics, memory controlled by this operation will
+        // be leaked.
+        finalize();
+
+        // We won't need to finalize again, so can use `fetch_sub` for the real
+        // decrement.
+        let old_count = self.strong.fetch_sub(1, Ordering::Release);
+        if old_count != 1 {
+            return FreeAction::None;
+        }
+
+        // The strong count is officially `0`. Perform one last acquire fence to
+        // ensure new writes are visible to destructors.
+        atomic::fence(Ordering::Acquire);
+
+        // PANIC: If `drop_fields` panics, memory controlled by this operation
+        // will be leaked.
+        drop_fields();
 
         // Finally, drop the implicit weak reference held due to a non-zero
         // strong reference.
-        self.release_weak(ptr);
+        self.dec_weak()
     }
 }
 
-
-
-
-
-unsafe fn drop_fields<T: Refcounted>(ptr: &T) {
-    ptr.drop_fields();
-}
-
-unsafe fn free_storage<T: Refcounted>(ptr: &T) {
-    drop(Box::from_raw(ptr as *const T as *mut ManuallyDrop<T>));
-}
-
-
-pub struct AtomicRefcnt2 {
-    val: AtomicUsize,
-}
-
-impl Refcnt for AtomicRefcnt2 {
-    unsafe fn new() -> Self {
-        AtomicRefcnt2 {
-            val: AtomicUsize::new(1),
+impl<W> RefcntImpl<Cell<usize>, W>
+where
+    W: IncDecCount,
+{
+    /// Attempt to upgrade a weak reference to a strong reference by
+    /// incrementing the strong reference count. If this method returns `true`,
+    /// the upgrade was successful, and if it returns `false`, the strong
+    /// reference count has reached `0`, and has been destroyed.
+    unsafe fn upgrade(&self) -> UpgradeAction {
+        let prev_value = self.strong.get();
+        if prev_value == 0 {
+            return UpgradeAction::None;
         }
-    }
 
-    #[inline]
-    fn get(&self) -> usize {
-        self.val.load(SeqCst)
-    }
-
-    #[inline]
-    unsafe fn inc(&self) -> usize {
-        // Using a relaxed ordering is OK here, as knowledge of an existing
-        // reference prevents other threads from erroneously deleting the object
-        // while we're incrementing.
-        //
-        // As we have a reference to `self`, we know there is a live reference
-        // to our containing object which this count is referring to.
-        //
-        // This is documented in more detail in the rustc source code for `Arc`.
-        let old_count = self.val.fetch_add(1, Relaxed);
-
-        // Guard against massive reference counts by aborting if you exceed
-        // `isize::MAX`.
-        if old_count > MAX_REFCOUNT {
+        // Guard against massive reference counts by aborting if it would
+        // exceed `isize::MAX`.
+        if prev_value > MAX_REFCOUNT - 1 {
             abort();
         }
 
-        old_count + 1
+        self.strong.set(prev_value + 1);
+        UpgradeAction::Upgrade
     }
 
-    #[inline]
-    unsafe fn try_inc(&self) -> bool {
-        // We use a CAS loop to increment the count instead of a fetch_add
-        // because once the count hits 0 it must never be above 0.
-
-        // Relaxed load because any write of 0 that we can observe leaves the
-        // field in a permanently zero state (so a "stale" read of 0 is fine).
-        //
-        // CAS store is relaxed for the same reason it is on `inc`.
-        fetch_update(self.val, Relaxed, Relaxed, |count| {
-            if count == 0 {
-                return None;
-            }
-
-            if count > MAX_REFCOUNT - 1 {
-                abort();
-            }
-
-            Some(count + 1)
-        });
-    }
-
-    #[inline]
-    unsafe fn dec(&self) -> usize {
-        self.val.fetch_sub(1, Release)
-    }
-
-    #[inline]
-    fn acquire(&self) {
-        atomic::fence(Acquire);
-    }
-
-    #[inline]
-    fn compare_exchange(
+    unsafe fn dec_strong_finalize(
         &self,
-        prev: usize,
-        next: usize,
-        store_order: Ordering,
-        load_order: Ordering,
-    ) -> Result<usize, usize> {
-        self.val
-            .compare_exchange_weak(prev, next, store_order, load_order)
-    }
-}
-
-/// Atomic internal reference count.
-pub struct AtomicRefcnt {
-    val: AtomicUsize,
-}
-
-impl AtomicRefcnt {
-    /// Create a new `AtomicRefcnt`
-    ///
-    /// This method is unsafe to prevent creation of `Refcounted` types outside
-    /// of generated methods.
-    #[inline]
-    pub unsafe fn new() -> Self {
-        AtomicRefcnt {
-            val: AtomicUsize::new(1),
-        }
-    }
-
-    #[inline]
-    pub fn get_strong(&self) -> usize {
-        self.val.load(SeqCst)
-    }
-
-    #[inline]
-    pub unsafe fn inc_strong(&self) {
-        // Using a relaxed ordering is OK here, as knowledge of an existing
-        // reference prevents other threads from erroneously deleting the object
-        // while we're incrementing.
-        //
-        // As we have a reference to `self`, we know there is a live reference
-        // to our containing object which this count is referring to.
-        //
-        // This is documented in more detail in the rustc source code for `Arc`.
-        let old_count = self.val.fetch_add(1, Relaxed);
-
-        // Guard against massive reference counts by aborting if you exceed
-        // `isize::MAX`.
-        if old_count > MAX_REFCOUNT {
-            abort();
-        }
-    }
-
-    #[inline]
-    pub unsafe fn dec_strong<T: Refcounted>(&self, ptr: &T) {
-        // If we've decreased to a non-zero value, we can immediately return.
-        let old_count = self.val.fetch_sub(1, Release);
-        if old_count != 1 {
-            return;
+        drop_fields: impl FnOnce(),
+        finalize: impl FnOnce(),
+    ) -> FreeAction {
+        let prev_value = self.strong.get();
+        if prev_value != 1 {
+            self.strong.set(prev_value - 1);
+            return FreeAction::None;
         }
 
-        // We're about to drop the object in question due to the count reaching
-        // zero. As documented in the `Arc` implementation, we need to be sure
-        // that any other writes (e.g. in interior mutability) are visible to
-        // our thread before we release, so we need to perform an `Acquire`
-        // fence here.
-        atomic::fence(Acquire);
+        // We are the last remaining reference, but haven't decremented it yet.
+        // Invoke finalize to give the object a chance to clean up. This may
+        // create new references.
+        finalize();
 
-        // Drop any data currently stored in this actor, and free the backing
-        // memory.
-        drop_fields(ptr);
-        free_storage(ptr);
-    }
-}
-
-impl fmt::Debug for AtomicRefcnt {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("AtomicRefcnt")
-            .field(&self.get_strong())
-            .finish()
-    }
-}
-
-/// Non-atomic internal reference count.
-pub struct Refcnt {
-    val: Cell<usize>,
-}
-
-impl Refcnt {
-    /// Create a new `Refcnt`
-    ///
-    /// This method is unsafe to prevent creation of `Refcounted` types outside
-    /// of generated methods.
-    #[inline]
-    pub unsafe fn new() -> Self {
-        Refcnt { val: Cell::new(1) }
-    }
-
-    #[inline]
-    pub fn get_strong(&self) -> usize {
-        self.val.get()
-    }
-
-    #[inline]
-    pub unsafe fn inc_strong(&self) {
-        if self.val.get() == usize::max_value() {
-            abort();
-        }
-        self.val.set(self.val.get() + 1);
-    }
-
-    #[inline]
-    pub unsafe fn dec_strong<T: Refcounted>(&self, ptr: &T) {
-        self.val.set(self.val.get() - 1);
-
-        if self.val.get() == 0 {
-            // Drop any data currently stored in this actor, and free the
-            // backing memory.
-            drop_fields(ptr);
-            free_storage(ptr);
-        }
-    }
-}
-
-impl fmt::Debug for Refcnt {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Refcnt").field(&self.get_strong()).finish()
-    }
-}
-
-/// Atomic internal reference count.
-pub struct AtomicRefcntWeak {
-    strong: AtomicUsize,
-    weak: AtomicUsize,
-}
-
-impl AtomicRefcntWeak {
-    /// Create a new `AtomicRefcnt`
-    ///
-    /// This method is unsafe to prevent creation of `Refcounted` types outside
-    /// of generated methods.
-    #[inline]
-    pub unsafe fn new() -> Self {
-        AtomicRefcntWeak {
-            strong: AtomicUsize::new(1),
-
-            // The weak reference starts at 1, as the strong refcount holds a
-            // weak reference to keep the object alive.
-            weak: AtomicUsize::new(1),
-        }
-    }
-
-    #[inline]
-    pub fn get_strong(&self) -> usize {
-        self.strong.load(SeqCst)
-    }
-
-    #[inline]
-    pub unsafe fn inc_strong(&self) {
-        // Using a relaxed ordering is OK here, as knowledge of an existing
-        // reference prevents other threads from erroneously deleting the object
-        // while we're incrementing.
-        //
-        // As we have a reference to `self`, we know there is a live reference
-        // to our containing object which this count is referring to.
-        //
-        // This is documented in more detail in the rustc source code for `Arc`.
-        let old_count = self.strong.fetch_add(1, Relaxed);
-
-        // Guard against massive reference counts by aborting if you exceed
-        // `isize::MAX`.
-        if old_count > MAX_REFCOUNT {
-            abort();
-        }
-    }
-
-    #[inline]
-    pub unsafe fn dec_strong<T: Refcounted>(&self, ptr: &T) {
-        // If we've decreased to a non-zero value, we can immediately return.
-        let old_count = self.strong.fetch_sub(1, Release);
-        if old_count != 1 {
-            return;
-        }
-
-        // We're about to drop the object in question due to the count reaching
-        // zero. As documented in the `Arc` implementation, we need to be sure
-        // that any other writes (e.g. in interior mutability) are visible to
-        // our thread before we release, so we need to perform an `Acquire`
-        // fence here.
-        atomic::fence(Acquire);
-
-        // Drop any remaining fields, and then drop our self-weak-reference,
-        // which may cause the backing storage to also be freed.
-        drop_fields(ptr);
-        self.dec_weak(ptr);
-    }
-
-    #[inline]
-    pub fn get_weak(&self) -> usize {
-        self.weak.load(SeqCst)
-    }
-
-    #[inline]
-    pub unsafe fn inc_weak(&self) {
-        // See the documentation for inc_strong for more details on why this is
-        // OK to be `Relaxed`.
-        let old_count = self.weak.fetch_add(1, Relaxed);
-
-        // Guard against massive reference counts by aborting if you exceed
-        // `isize::MAX`.
-        if old_count > MAX_REFCOUNT {
-            abort();
-        }
-    }
-
-    #[inline]
-    pub unsafe fn dec_weak<T: Refcounted>(&self, ptr: &T) {
-        // If we've decreased to a non-zero value, we can immediately return.
-        let old_count = self.weak.fetch_sub(1, Release);
-        if old_count != 1 {
-            return;
-        }
-
-        // We're about to free the object in question due to the count reaching
-        // zero. As documented in the `Arc` implementation, we need to be sure
-        // that any other writes (e.g. in interior mutability) are visible to
-        // our thread before we free the memory, so we need to perform an
-        // `Acquire` fence here.
-        atomic::fence(Acquire);
-
-        // If we reach zero, our strong reference count must have already
-        // reached 0, so we can free any backing storage.
-        debug_assert!(self.get_strong() == 0);
-        free_storage(ptr);
-    }
-
-    #[inline]
-    pub unsafe fn upgrade(&self) -> bool {
-        // We use a CAS loop to increment the strong count instead of a
-        // fetch_add because once the count hits 0 it must never be above 0.
-
-        // Relaxed load because any write of 0 that we can observe
-        // leaves the field in a permanently zero state (so a
-        // "stale" read of 0 is fine), and any other value is
-        // confirmed via the CAS below.
-        let mut count = self.strong.load(Relaxed);
-        loop {
-            if count == 0 {
-                return false;
-            }
-
-            if count > MAX_REFCOUNT - 1 {
-                abort();
-            }
-
-            // Relaxed is valid for the same reason it is on `inc_strong`.
-            match self
-                .strong
-                .compare_exchange_weak(count, count + 1, Relaxed, Relaxed)
-            {
-                Ok(_) => return true,
-                Err(old) => count = old,
-            }
-        }
-    }
-}
-
-impl fmt::Debug for AtomicRefcntWeak {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AtomicRefcntWeak")
-            .field("strong", &self.get_strong())
-            .field("weak", &self.get_weak())
-            .finish()
-    }
-}
-
-/// Non-atomic internal reference count with weak ref support.
-pub struct RefcntWeak {
-    strong: Cell<usize>,
-    weak: Cell<usize>,
-}
-
-impl RefcntWeak {
-    /// Create a new `RefcntWeak`
-    ///
-    /// This method is unsafe to prevent creation of `Refcounted` types outside
-    /// of generated methods.
-    #[inline]
-    pub unsafe fn new() -> Self {
-        RefcntWeak {
-            strong: Cell::new(1),
-            weak: Cell::new(1),
-        }
-    }
-
-    #[inline]
-    pub fn get_strong(&self) -> usize {
-        self.strong.get()
-    }
-
-    #[inline]
-    pub unsafe fn inc_strong(&self) {
-        if self.strong.get() == usize::max_value() {
-            abort();
-        }
-        self.strong.set(self.strong.get() + 1);
-    }
-
-    #[inline]
-    pub unsafe fn dec_strong<T: Refcounted>(&self, ptr: &T) {
-        self.strong.set(self.strong.get() - 1);
-
-        if self.strong.get() == 0 {
-            // Drop any data currently stored in this actor, and remove the
-            // implicit self weak-reference.
-            drop_fields(ptr);
-            self.dec_weak(ptr)
-        }
-    }
-
-    #[inline]
-    pub fn get_weak(&self) -> usize {
-        self.weak.get()
-    }
-
-    #[inline]
-    pub unsafe fn inc_weak(&self) {
-        if self.weak.get() == usize::max_value() {
-            abort();
-        }
-        self.weak.set(self.weak.get() + 1);
-    }
-
-    #[inline]
-    pub unsafe fn dec_weak<T: Refcounted>(&self, ptr: &T) {
-        self.weak.set(self.weak.get() - 1);
-
-        if self.weak.get() == 0 {
-            free_storage(ptr);
-        }
-    }
-
-    #[inline]
-    pub unsafe fn upgrade(&self) -> bool {
-        let strong = self.strong.get();
-        if strong == 0 {
-            return false;
-        }
-
-        if strong == usize::max_value() {
-            abort();
-        }
-        self.strong.set(strong + 1);
-        true
-    }
-}
-
-impl fmt::Debug for RefcntWeak {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RefcntWeak")
-            .field("strong", &self.get_strong())
-            .field("weak", &self.get_weak())
-            .finish()
+        // Try to drop our last remaining reference.
+        self.dec_strong(drop_fields)
     }
 }

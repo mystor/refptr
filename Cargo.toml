@@ -8,5 +8,4 @@ edition = "2018"
 members = ["rcptr-macros"]
 
 [dependencies]
-radium = "0.1"
 rcptr-macros = { version = "0.1.0", path = "rcptr-macros" }

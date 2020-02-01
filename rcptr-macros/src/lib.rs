@@ -85,10 +85,10 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
 
     let name = item.ident.clone();
     let rc_field_ty: Type = match (cfg.rc_kind, cfg.weak_kind) {
-        (RcKind::Nonatomic, WeakKind::NonWeak) => parse_quote!(::rcptr::control::Refcnt),
-        (RcKind::Atomic, WeakKind::NonWeak) => parse_quote!(::rcptr::control::AtomicRefcnt),
-        (RcKind::Nonatomic, WeakKind::Weak) => parse_quote!(::rcptr::control::RefcntWeak),
-        (RcKind::Atomic, WeakKind::Weak) => parse_quote!(::rcptr::control::AtomicRefcntWeak),
+        (RcKind::Nonatomic, WeakKind::NonWeak) => parse_quote!(::rcptr::control::Refcnt<Self>),
+        (RcKind::Atomic, WeakKind::NonWeak) => parse_quote!(::rcptr::control::AtomicRefcnt<Self>),
+        (RcKind::Nonatomic, WeakKind::Weak) => parse_quote!(::rcptr::control::RefcntWeak<Self>),
+        (RcKind::Atomic, WeakKind::Weak) => parse_quote!(::rcptr::control::AtomicRefcntWeak<Self>),
     };
 
     // Add our _refcnt field, and extract the original fields
@@ -120,28 +120,29 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
         }
     }).collect::<TokenStream>();
 
-    let maybe_finalize = if cfg.has_finalize {
-        quote!(self.finalize();)
+    let release = if cfg.has_finalize {
+        quote! {
+            self._refcnt.dec_strong_finalize(
+                || { #drop_fields },
+                || self.finalize(),
+            )
+        }
     } else {
-        quote!()
+        quote! {
+            self._refcnt.dec_strong(|| { #drop_fields })
+        }
     };
 
     let impl_refcounted = quote!{
         unsafe impl #impl_generics ::rcptr::Refcounted for #name #ty_generics #where_clause {
             #[inline]
             unsafe fn addref(&self) {
-                self._refcnt.inc_strong();
+                self._refcnt.inc_strong()
             }
 
             #[inline]
-            unsafe fn release(&self) {
-                self._refcnt.dec_strong(self);
-            }
-
-            #[inline]
-            unsafe fn drop_fields(&self) {
-                #maybe_finalize
-                #drop_fields
+            unsafe fn release(&self) -> ::rcptr::control::FreeAction {
+                #release
             }
         }
     };
@@ -151,16 +152,16 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
             unsafe impl #impl_generics ::rcptr::WeakRefcounted for #name #ty_generics #where_clause {
                 #[inline]
                 unsafe fn weak_addref(&self) {
-                    self._refcnt.inc_weak();
+                    self._refcnt.inc_weak()
                 }
 
                 #[inline]
-                unsafe fn weak_release(&self) {
-                    self._refcnt.dec_weak(self);
+                unsafe fn weak_release(&self) -> ::rcptr::control::FreeAction {
+                    self._refcnt.dec_weak()
                 }
 
                 #[inline]
-                unsafe fn upgrade(&self) -> bool {
+                unsafe fn upgrade(&self) -> ::rcptr::control::UpgradeAction {
                     self._refcnt.upgrade()
                 }
             }
@@ -185,11 +186,11 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
             #[inline]
             fn alloc(#params) -> ::rcptr::RefPtr<Self> {
                 let raw = Box::into_raw(Box::new(#name {
-                    _refcnt: unsafe { #rc_field_ty::new() },
+                    _refcnt: unsafe { <#rc_field_ty>::new() },
                     #inits
                 }));
 
-                unsafe { ::rcptr::RefPtr::dont_addref(&*raw) }
+                unsafe { ::rcptr::RefPtr::from_raw(raw) }
             }
         }
     };
@@ -199,7 +200,7 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
     let impl_drop = quote!{
         impl #impl_generics Drop for #name #ty_generics #where_clause {
             fn drop(&mut self) {
-                debug_assert!(self._refcnt.get_strong() == 0);
+                unreachable!("Drop never called on Refcounted types");
             }
         }
     };
@@ -236,7 +237,10 @@ pub fn refcounted(
     let input = parse_macro_input!(input as ItemStruct);
 
     match refcounted_impl(args, input) {
-        Ok(ts) => ts.into(),
+        Ok(ts) => {
+            eprintln!("{}", ts);
+            ts.into()
+        },
         Err(e) => e.to_compile_error().into(),
     }
 }
