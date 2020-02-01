@@ -8,7 +8,6 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::process::abort;
-use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{self, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -32,10 +31,10 @@ pub enum UpgradeAction {
 }
 
 impl UpgradeAction {
-    pub unsafe fn take_action<T: ?Sized + Refcounted>(self, ptr: NonNull<T>) -> Option<RefPtr<T>> {
+    pub unsafe fn take_action<T: ?Sized + Refcounted>(self, ptr: *const T) -> Option<RefPtr<T>> {
         match self {
             UpgradeAction::None => None,
-            UpgradeAction::Upgrade => Some(RefPtr::from_raw(ptr.as_ptr())),
+            UpgradeAction::Upgrade => Some(RefPtr::from_raw(ptr)),
         }
     }
 }
@@ -52,12 +51,12 @@ pub enum FreeAction {
 }
 
 impl FreeAction {
-    pub unsafe fn take_action<T: ?Sized>(self, ptr: NonNull<T>) {
+    pub unsafe fn take_action<T: ?Sized>(self, ptr: *const T) {
         match self {
             FreeAction::None => {}
             FreeAction::FreeMemory => {
                 // Unsafely drop the value stored in `ptr`.
-                Box::from_raw(ptr.as_ptr() as *mut ManuallyDrop<T>);
+                Box::from_raw(ptr as *mut T as *mut ManuallyDrop<T>);
             }
         }
     }

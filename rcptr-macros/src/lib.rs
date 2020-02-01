@@ -120,21 +120,21 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
             let name = &field.ident;
             let ty = &field.ty;
             quote! {
-                ::std::ptr::drop_in_place((&self.#name) as *const #ty as *mut #ty);
+                ::std::ptr::drop_in_place((&(*this).#name) as *const #ty as *mut #ty);
             }
         })
         .collect::<TokenStream>();
 
     let release = if cfg.has_finalize {
         quote! {
-            self.refcnt.dec_strong_finalize(
+            (*this).refcnt.dec_strong_finalize(
                 || { #drop_fields },
-                || self.finalize(),
+                || (*this).finalize(),
             )
         }
     } else {
         quote! {
-            self.refcnt.dec_strong(|| { #drop_fields })
+            (*this).refcnt.dec_strong(|| { #drop_fields })
         }
     };
 
@@ -146,8 +146,8 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
             }
 
             #[inline]
-            unsafe fn release(&self) -> ::rcptr::control::FreeAction {
-                #release
+            unsafe fn release(this: *const Self) {
+                #release.take_action(this)
             }
         }
     };
@@ -156,18 +156,18 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
         quote! {
             unsafe impl #impl_generics ::rcptr::WeakRefcounted for #name #ty_generics #where_clause {
                 #[inline]
-                unsafe fn weak_addref(&self) {
-                    self.refcnt.inc_weak()
+                unsafe fn weak_addref(this: *const Self) {
+                    (*this).refcnt.inc_weak()
                 }
 
                 #[inline]
-                unsafe fn weak_release(&self) -> ::rcptr::control::FreeAction {
-                    self.refcnt.dec_weak()
+                unsafe fn weak_release(this: *const Self) {
+                    (*this).refcnt.dec_weak().take_action(this)
                 }
 
                 #[inline]
-                unsafe fn upgrade(&self) -> ::rcptr::control::UpgradeAction {
-                    self.refcnt.upgrade()
+                unsafe fn upgrade(this: *const Self) -> ::rcptr::control::UpgradeAction {
+                    (*this).refcnt.upgrade()
                 }
             }
         }

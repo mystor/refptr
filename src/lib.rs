@@ -6,10 +6,55 @@ use std::mem;
 use std::ops::Deref;
 use std::ptr::NonNull;
 
-pub use rcptr_macros::refcounted;
 
 pub mod control;
 
+/// Attribute for declaring [`Refcounted`] structs.
+///
+/// The `#[refcounted]` attribute can be applied to a `struct` declaration to
+/// mark it as refcounted. Refcounted structs are always allocated on the heap,
+/// and are constructed using the `make_refptr` helper macro.
+///
+/// # Finalization and `Drop`
+///
+/// Types annotated with this attribute cannot manually implement `Drop`, as it
+/// would allow recovering a `RefPtr<Self>` while the object is being dropped,
+/// leading to a use-after-free.
+///
+/// If a finalization method is needed, the `#[refcounted(finalize)]` attribute
+/// provides support for custom finalization. THis attribute causes a `fn
+/// finalize(&self)` method before dropping any fields. It is possible for code
+/// to acquire a new strong reference during the `finalize` method, which may
+/// cause the struct to not be dropped after it returns. Because of this,
+/// `finalize` may be called on the same struct multiple times over it's
+/// lifetime.
+///
+/// Fields are dropped first-to-last, as in normal structs.
+///
+/// # Options
+///
+/// ## `#[refcounted(atomic)]`
+///
+/// Use atomic reference counting, allowing the struct to to be shared between
+/// threads, so long as other fields implement `Send` and `Sync`.
+///
+/// ## `#[refcounted(nonatomic)]`
+///
+/// (default) Marks the struct as using non-atomic reference counts. Non-atomic
+/// reference counting may be faster than atomic, but structs using it cannot be
+/// shared between threads.
+///
+/// ## `#[refcounted(weak)]`
+///
+/// Adds support for weak reference counts and the [`WeakPtr`] smart pointer
+/// type. This annotation may be combined with other annotations.
+///
+/// ## `#[refcounted(finalize)]`
+///
+/// Calls a `fn finalize(&self)` method on the struct before attempting to
+/// destroy it. See the "Finalization" section for more details. This annotation
+/// may be combined with other annotations.
+pub use rcptr_macros::refcounted;
 
 /// Smart pointer for holding [`Refcounted`] objects.
 pub struct RefPtr<T: ?Sized + Refcounted> {
@@ -68,8 +113,7 @@ impl<T: ?Sized + Refcounted> Deref for RefPtr<T> {
 impl<T: ?Sized + Refcounted> Drop for RefPtr<T> {
     fn drop(&mut self) {
         unsafe {
-            let action = self.ptr.as_ref().release();
-            action.take_action(self.ptr);
+            T::release(self.ptr.as_ptr());
         }
     }
 }
@@ -86,7 +130,7 @@ pub struct WeakPtr<T: ?Sized + WeakRefcounted> {
 impl<T: ?Sized + WeakRefcounted> WeakPtr<T> {
     pub fn new(val: &T) -> WeakPtr<T> {
         unsafe {
-            val.weak_addref();
+            T::weak_addref(val);
 
             WeakPtr {
                 ptr: val.into(),
@@ -97,17 +141,15 @@ impl<T: ?Sized + WeakRefcounted> WeakPtr<T> {
 
     pub fn upgrade(&self) -> Option<RefPtr<T>> {
         unsafe {
-            let action = self.ptr.as_ref().upgrade();
-            action.take_action(self.ptr)
+            let action = T::upgrade(self.ptr.as_ptr());
+            action.take_action(self.ptr.as_ptr())
         }
     }
 }
 
 impl<T: ?Sized + WeakRefcounted> Clone for WeakPtr<T> {
     fn clone(&self) -> Self {
-        unsafe {
-            self.ptr.as_ref().weak_addref();
-        }
+        unsafe { T::weak_addref(self.ptr.as_ptr()); }
 
         WeakPtr {
             ptr: self.ptr,
@@ -118,10 +160,7 @@ impl<T: ?Sized + WeakRefcounted> Clone for WeakPtr<T> {
 
 impl<T: ?Sized + WeakRefcounted> Drop for WeakPtr<T> {
     fn drop(&mut self) {
-        unsafe {
-            let action = self.ptr.as_ref().weak_release();
-            action.take_action(self.ptr);
-        }
+        unsafe { T::weak_release(self.ptr.as_ptr()); }
     }
 }
 
@@ -138,12 +177,25 @@ unsafe impl<T: ?Sized + WeakRefcounted + Sync + Send> Sync for WeakPtr<T> {}
 /// are invasively reference counted. It has a few different constraints put upon
 /// those objects.
 ///
+/// Objects of this type are always allocated on the heap, and have their
+/// lifecycle managed using the [`RefPtr`] smart pointer.
+///
 /// ## Safety
 ///
 ///  * `Refcounted` objects are always heap-allocated
 ///  * Only shared references may exist to `Refcounted` objects
 ///  * If the `addref` method has been called more times than the `release`
 ///    method, the object must not be dropped.
+///
+/// ## Trait Objects
+///
+/// Unfortunately, the `Refcounted` interface is currently not object-safe, as
+/// the `release` method takes a `this: *const Self`. This may change if Rust
+/// adds support for raw pointer receivers on unsafe trait methods.
+///
+/// The `release` method cannot take `&self`, as it may be freed or become
+/// partially invalid during the execution of the method, which would violate
+/// reference type guarantees.
 pub unsafe trait Refcounted {
     /// Increment the strong reference count for this object.
     ///
@@ -159,7 +211,7 @@ pub unsafe trait Refcounted {
     ///
     /// Prefer managing the lifecycle of `Refcounted` objects with [`RefPtr`]
     /// over manually calling these methods.
-    unsafe fn release(&self) -> control::FreeAction;
+    unsafe fn release(this: *const Self);
 }
 
 pub unsafe trait WeakRefcounted: Refcounted {
@@ -167,13 +219,13 @@ pub unsafe trait WeakRefcounted: Refcounted {
     ///
     /// Prefer managing the lifecycle of `WeakRefcounted` objects with
     /// [`WeakPtr`] over manually calling these methods.
-    unsafe fn weak_addref(&self);
+    unsafe fn weak_addref(this: *const Self);
 
     /// Decrement the weak reference count of this object.
     ///
     /// Prefer managing the lifecycle of `WeakRefcounted` objects with
     /// [`WeakPtr`] over manually calling these methods.
-    unsafe fn weak_release(&self) -> control::FreeAction;
+    unsafe fn weak_release(this: *const Self);
 
     /// Attempt to obtain a new strong reference to this object.
     ///
@@ -182,7 +234,7 @@ pub unsafe trait WeakRefcounted: Refcounted {
     ///
     /// This method will return `UpgradeAction::Upgrade` if the strong reference
     /// count was successfully incremented.
-    unsafe fn upgrade(&self) -> control::UpgradeAction;
+    unsafe fn upgrade(this: *const Self) -> control::UpgradeAction;
 }
 
 // Trait impls for `RefPtr<T>`
@@ -252,7 +304,7 @@ impl<T: ?Sized + Refcounted> From<&T> for RefPtr<T> {
 // Not public API.
 #[doc(ignore)]
 pub mod __rt {
-    use crate::{Refcounted, RefPtr};
+    use crate::{RefPtr, Refcounted};
     pub use std::mem::ManuallyDrop;
 
     pub unsafe fn alloc<T: Refcounted>(value: ManuallyDrop<T>) -> RefPtr<T> {
@@ -275,9 +327,9 @@ pub mod __rt {
 /// ```
 #[macro_export]
 macro_rules! make_refptr {
-    ($name:ident { $($f:tt)* }) => {
+    ($($seg:ident $(::<$($t:ty),*>)?)::+ { $($f:tt)* }) => {
         {
-            let value = $crate::__rt::ManuallyDrop::new($name {
+            let value = $crate::__rt::ManuallyDrop::new($($seg $(::<$($t),*>)?)::+ {
                 refcnt: unsafe { $crate::control::ControlBlock::new() },
                 $($f)*
             });
