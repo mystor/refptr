@@ -1,10 +1,10 @@
 use std::cmp::Ordering;
-use std::marker::PhantomData;
-use std::ops::Deref;
-use std::ptr::NonNull;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
 use std::mem;
+use std::ops::Deref;
+use std::ptr::NonNull;
 
 pub use rcptr_macros::refcounted;
 
@@ -76,7 +76,6 @@ impl<T: ?Sized + Refcounted> Drop for RefPtr<T> {
 unsafe impl<T: ?Sized + Refcounted + Sync + Send> Send for RefPtr<T> {}
 unsafe impl<T: ?Sized + Refcounted + Sync + Send> Sync for RefPtr<T> {}
 
-
 /// A reference counted pointer type for holding refcounted objects.
 pub struct WeakPtr<T: ?Sized + WeakRefcounted> {
     ptr: NonNull<T>,
@@ -134,7 +133,6 @@ impl<T: ?Sized + WeakRefcounted> fmt::Debug for WeakPtr<T> {
 unsafe impl<T: ?Sized + WeakRefcounted + Sync + Send> Send for WeakPtr<T> {}
 unsafe impl<T: ?Sized + WeakRefcounted + Sync + Send> Sync for WeakPtr<T> {}
 
-
 /// The primary trait of this library. This trait is implemented by objects which
 /// are invasively reference counted. It has a few different constraints put upon
 /// those objects.
@@ -169,7 +167,6 @@ pub unsafe trait WeakRefcounted: Refcounted {
     /// successfully incremented.
     unsafe fn upgrade(&self) -> control::UpgradeAction;
 }
-
 
 // Trait impls for `RefPtr<T>`
 

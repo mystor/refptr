@@ -7,7 +7,7 @@ use quote::quote;
 use syn::spanned::Spanned;
 use syn::{
     parse_macro_input, parse_quote, AttributeArgs, Error, Field, Fields, ItemStruct, Meta,
-    NestedMeta, Visibility, Type,
+    NestedMeta, Type, Visibility,
 };
 
 macro_rules! fail {
@@ -77,7 +77,11 @@ fn parse_config(args: AttributeArgs) -> Result<Config, Error> {
     }
 
     let rc_kind = rc_kind.unwrap_or(RcKind::Nonatomic);
-    Ok(Config { rc_kind, weak_kind, has_finalize })
+    Ok(Config {
+        rc_kind,
+        weak_kind,
+        has_finalize,
+    })
 }
 
 fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStream, Error> {
@@ -112,13 +116,16 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
     let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
 
     // drop_in_place each non-added field in the struct.
-    let drop_fields = orig_fields.iter().map(|field| {
-        let name = &field.ident;
-        let ty = &field.ty;
-        quote!{
-            ::std::ptr::drop_in_place((&self.#name) as *const #ty as *mut #ty);
-        }
-    }).collect::<TokenStream>();
+    let drop_fields = orig_fields
+        .iter()
+        .map(|field| {
+            let name = &field.ident;
+            let ty = &field.ty;
+            quote! {
+                ::std::ptr::drop_in_place((&self.#name) as *const #ty as *mut #ty);
+            }
+        })
+        .collect::<TokenStream>();
 
     let release = if cfg.has_finalize {
         quote! {
@@ -133,7 +140,7 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
         }
     };
 
-    let impl_refcounted = quote!{
+    let impl_refcounted = quote! {
         unsafe impl #impl_generics ::rcptr::Refcounted for #name #ty_generics #where_clause {
             #[inline]
             unsafe fn addref(&self) {
@@ -148,7 +155,7 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
     };
 
     let impl_weak = if cfg.weak_kind == WeakKind::Weak {
-        quote!{
+        quote! {
             unsafe impl #impl_generics ::rcptr::WeakRefcounted for #name #ty_generics #where_clause {
                 #[inline]
                 unsafe fn weak_addref(&self) {
@@ -170,18 +177,24 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
         quote!()
     };
 
-    let params = orig_fields.iter().map(|field| {
-        let name = &field.ident;
-        let ty = &field.ty;
-        quote!(#name : #ty,)
-    }).collect::<TokenStream>();
-    let inits = orig_fields.iter().map(|field| {
-        let name = &field.ident;
-        quote!(#name,)
-    }).collect::<TokenStream>();
+    let params = orig_fields
+        .iter()
+        .map(|field| {
+            let name = &field.ident;
+            let ty = &field.ty;
+            quote!(#name : #ty,)
+        })
+        .collect::<TokenStream>();
+    let inits = orig_fields
+        .iter()
+        .map(|field| {
+            let name = &field.ident;
+            quote!(#name,)
+        })
+        .collect::<TokenStream>();
 
     // Expose an inherent `alloc` method which allocates the object onto the heap.
-    let impl_alloc = quote!{
+    let impl_alloc = quote! {
         impl #impl_generics #name #ty_generics #where_clause {
             #[inline]
             fn alloc(#params) -> ::rcptr::RefPtr<Self> {
@@ -197,7 +210,7 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
 
     // Prevent any other implementations of `Drop`, as they can be unsound (due
     // to being able to create a `RefPtr` to a dropped struct).
-    let impl_drop = quote!{
+    let impl_drop = quote! {
         impl #impl_generics Drop for #name #ty_generics #where_clause {
             fn drop(&mut self) {
                 unreachable!("Drop never called on Refcounted types");
@@ -205,7 +218,7 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
         }
     };
 
-    Ok(quote!{
+    Ok(quote! {
         #item
         #impl_refcounted
         #impl_weak
@@ -240,7 +253,7 @@ pub fn refcounted(
         Ok(ts) => {
             eprintln!("{}", ts);
             ts.into()
-        },
+        }
         Err(e) => e.to_compile_error().into(),
     }
 }
