@@ -1,4 +1,4 @@
-use rcptr::{refcounted, RefPtr};
+use rcptr::{refcounted, make_refptr, RefPtr};
 
 #[refcounted]
 struct MyStruct {
@@ -32,9 +32,9 @@ struct MyNonatomicWeak {
 
 #[test]
 fn foo() {
-    let _a: RefPtr<MyAtomic> = MyAtomic::alloc(5, 10);
-    let _b: RefPtr<MyStruct> = MyStruct::alloc(5, 10);
-    let _c: RefPtr<MyNonatomic> = MyNonatomic::alloc(5, 10);
-    let _d: RefPtr<MyAtomicWeak> = MyAtomicWeak::alloc(5, 10);
-    let _d: RefPtr<MyNonatomicWeak> = MyNonatomicWeak::alloc(5, 10);
+    let _a: RefPtr<MyAtomic> = make_refptr!(MyAtomic { aaa: 5, bbb: 10 });
+    let _b: RefPtr<MyStruct> = make_refptr!(MyStruct { aaa: 5, bbb: 10 });
+    let _c: RefPtr<MyNonatomic> = make_refptr!(MyNonatomic { aaa: 5, bbb: 10 });
+    let _d: RefPtr<MyAtomicWeak> = make_refptr!(MyAtomicWeak { aaa: 5, bbb: 10 });
+    let _d: RefPtr<MyNonatomicWeak> = make_refptr!(MyNonatomicWeak { aaa: 5, bbb: 10 });
 }

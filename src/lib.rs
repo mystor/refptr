@@ -10,6 +10,7 @@ pub use rcptr_macros::refcounted;
 
 pub mod control;
 
+
 /// Smart pointer for holding [`Refcounted`] objects.
 pub struct RefPtr<T: ?Sized + Refcounted> {
     ptr: NonNull<T>,
@@ -146,25 +147,41 @@ unsafe impl<T: ?Sized + WeakRefcounted + Sync + Send> Sync for WeakPtr<T> {}
 pub unsafe trait Refcounted {
     /// Increment the strong reference count for this object.
     ///
+    /// Prefer managing the lifecycle of `Refcounted` objects with [`RefPtr`]
+    /// over manually calling these methods.
+    ///
     /// This must only be called while the strong reference count is at least 1.
     /// If only weak references only exist for this object, the `upgrade` method
     /// must be used instead.
     unsafe fn addref(&self);
 
     /// Decrement the strong reference count for this object.
+    ///
+    /// Prefer managing the lifecycle of `Refcounted` objects with [`RefPtr`]
+    /// over manually calling these methods.
     unsafe fn release(&self) -> control::FreeAction;
 }
 
 pub unsafe trait WeakRefcounted: Refcounted {
     /// Increment the weak reference count of this object.
+    ///
+    /// Prefer managing the lifecycle of `WeakRefcounted` objects with
+    /// [`WeakPtr`] over manually calling these methods.
     unsafe fn weak_addref(&self);
 
     /// Decrement the weak reference count of this object.
+    ///
+    /// Prefer managing the lifecycle of `WeakRefcounted` objects with
+    /// [`WeakPtr`] over manually calling these methods.
     unsafe fn weak_release(&self) -> control::FreeAction;
 
-    /// Attempt to obtain a new strong reference to this object. This method
-    /// will return `UpgradeAction::Upgrade` if the strong reference count was
-    /// successfully incremented.
+    /// Attempt to obtain a new strong reference to this object.
+    ///
+    /// Prefer managing the lifecycle of `WeakRefcounted` objects with
+    /// [`WeakPtr`] over manually calling these methods.
+    ///
+    /// This method will return `UpgradeAction::Upgrade` if the strong reference
+    /// count was successfully incremented.
     unsafe fn upgrade(&self) -> control::UpgradeAction;
 }
 
@@ -229,5 +246,43 @@ impl<T: ?Sized + Refcounted + Hash> Hash for RefPtr<T> {
 impl<T: ?Sized + Refcounted> From<&T> for RefPtr<T> {
     fn from(v: &T) -> Self {
         RefPtr::new(v)
+    }
+}
+
+// Not public API.
+#[doc(ignore)]
+pub mod __rt {
+    use crate::{Refcounted, RefPtr};
+    pub use std::mem::ManuallyDrop;
+
+    pub unsafe fn alloc<T: Refcounted>(value: ManuallyDrop<T>) -> RefPtr<T> {
+        RefPtr::from_raw(Box::into_raw(Box::new(value)) as *mut T)
+    }
+}
+
+/// Allocate a new instance of a [`Refcounted`] struct using a struct literal.
+///
+/// Returns a `RefPtr<T>` strong reference to the newly allocated struct.
+///
+/// # Example
+///
+/// ```
+/// # use rcptr::*;
+/// #[refcounted]
+/// struct HeapInt { value: i32 }
+///
+/// let ptr = make_refptr!(HeapInt { value: 10 });
+/// ```
+#[macro_export]
+macro_rules! make_refptr {
+    ($name:ident { $($f:tt)* }) => {
+        {
+            let value = $crate::__rt::ManuallyDrop::new($name {
+                refcnt: unsafe { $crate::control::ControlBlock::new() },
+                $($f)*
+            });
+
+            unsafe { $crate::__rt::alloc(value) }
+        }
     }
 }

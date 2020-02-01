@@ -1,5 +1,3 @@
-#![recursion_limit = "128"]
-
 extern crate proc_macro;
 
 use proc_macro2::TokenStream;
@@ -95,7 +93,7 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
         (RcKind::Atomic, WeakKind::Weak) => parse_quote!(::rcptr::control::AtomicRefcntWeak<Self>),
     };
 
-    // Add our _refcnt field, and extract the original fields
+    // Add our refcnt field, and extract the original fields
     let orig_fields;
     match &mut item.fields {
         Fields::Named(fields) => {
@@ -104,7 +102,7 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
             let rc_field = Field {
                 attrs: Vec::new(),
                 vis: Visibility::Inherited,
-                ident: parse_quote!(_refcnt),
+                ident: parse_quote!(refcnt),
                 colon_token: parse_quote!(:),
                 ty: rc_field_ty.clone(),
             };
@@ -129,14 +127,14 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
 
     let release = if cfg.has_finalize {
         quote! {
-            self._refcnt.dec_strong_finalize(
+            self.refcnt.dec_strong_finalize(
                 || { #drop_fields },
                 || self.finalize(),
             )
         }
     } else {
         quote! {
-            self._refcnt.dec_strong(|| { #drop_fields })
+            self.refcnt.dec_strong(|| { #drop_fields })
         }
     };
 
@@ -144,7 +142,7 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
         unsafe impl #impl_generics ::rcptr::Refcounted for #name #ty_generics #where_clause {
             #[inline]
             unsafe fn addref(&self) {
-                self._refcnt.inc_strong()
+                self.refcnt.inc_strong()
             }
 
             #[inline]
@@ -159,53 +157,22 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
             unsafe impl #impl_generics ::rcptr::WeakRefcounted for #name #ty_generics #where_clause {
                 #[inline]
                 unsafe fn weak_addref(&self) {
-                    self._refcnt.inc_weak()
+                    self.refcnt.inc_weak()
                 }
 
                 #[inline]
                 unsafe fn weak_release(&self) -> ::rcptr::control::FreeAction {
-                    self._refcnt.dec_weak()
+                    self.refcnt.dec_weak()
                 }
 
                 #[inline]
                 unsafe fn upgrade(&self) -> ::rcptr::control::UpgradeAction {
-                    self._refcnt.upgrade()
+                    self.refcnt.upgrade()
                 }
             }
         }
     } else {
         quote!()
-    };
-
-    let params = orig_fields
-        .iter()
-        .map(|field| {
-            let name = &field.ident;
-            let ty = &field.ty;
-            quote!(#name : #ty,)
-        })
-        .collect::<TokenStream>();
-    let inits = orig_fields
-        .iter()
-        .map(|field| {
-            let name = &field.ident;
-            quote!(#name,)
-        })
-        .collect::<TokenStream>();
-
-    // Expose an inherent `alloc` method which allocates the object onto the heap.
-    let impl_alloc = quote! {
-        impl #impl_generics #name #ty_generics #where_clause {
-            #[inline]
-            fn alloc(#params) -> ::rcptr::RefPtr<Self> {
-                let raw = Box::into_raw(Box::new(#name {
-                    _refcnt: unsafe { <#rc_field_ty>::new() },
-                    #inits
-                }));
-
-                unsafe { ::rcptr::RefPtr::from_raw(raw) }
-            }
-        }
     };
 
     // Prevent any other implementations of `Drop`, as they can be unsound (due
@@ -222,23 +189,8 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
         #item
         #impl_refcounted
         #impl_weak
-        #impl_alloc
         #impl_drop
     })
-}
-
-#[test]
-fn test_refcounted() {
-    let args = Vec::new();
-    let input = parse_quote! {
-        struct Foo {
-            a: i32,
-            b: u32,
-        }
-    };
-
-    println!("{}", refcounted_impl(args, input).unwrap());
-    panic!();
 }
 
 #[proc_macro_attribute]
@@ -250,10 +202,7 @@ pub fn refcounted(
     let input = parse_macro_input!(input as ItemStruct);
 
     match refcounted_impl(args, input) {
-        Ok(ts) => {
-            eprintln!("{}", ts);
-            ts.into()
-        }
+        Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
 }

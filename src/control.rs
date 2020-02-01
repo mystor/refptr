@@ -63,26 +63,34 @@ impl FreeAction {
     }
 }
 
+pub trait ControlBlock {
+    /// Create a new control block, initialized to a strong (and weak,
+    /// if applicable), reference count of `1`.
+    unsafe fn new() -> Self;
+}
+
 macro_rules! decl_control {
     ($name:ident, $atomic:ident, [$strong:ty $(, $weak:ty)?]) => {
+        /// Reference counting control block used by the
+        /// [`#[refcounted]`](`crate::refcounted`) macro.
         pub struct $name<T: ?Sized> {
             inner: RefcntImpl<$strong $(, $weak)?>,
-            /// This marker is required to limit the type to only be `Sync` if
-            /// it is also `Send`, as otherwise we could pass a non-`Send` `&T`
-            /// to another thread, acquire a reference, and drop it there.
+            // This marker is required to limit the type to only be `Sync` if
+            // it is also `Send`, as otherwise we could pass a non-`Send` `&T`
+            // to another thread, acquire a reference, and drop it there.
             _marker: PhantomData<$atomic<T>>,
         }
 
-        impl<T: ?Sized> $name<T> {
-            /// Create a new control block, initialized to a strong (and weak,
-            /// if applicable), reference count of `1`.
-            pub unsafe fn new() -> Self {
+        impl<T: ?Sized> ControlBlock for $name<T> {
+            unsafe fn new() -> Self {
                 $name {
                     inner: RefcntImpl::new(),
                     _marker: PhantomData,
                 }
             }
+        }
 
+        impl<T: ?Sized> $name<T> {
             /// Increment the allocation's strong reference count.
             pub unsafe fn inc_strong(&self) {
                 self.inner.inc_strong()
