@@ -1,3 +1,122 @@
+//! Macros, attributes, and traits for invasively reference-counted structs in Rust.
+//!
+//! This crate is centered around manipulating invasively reference counted
+//! structs. These structs are declared using the `#[refcounted]` attribute,
+//! constructed with the [`make_refptr`] macro, and have their lifetimes managed
+//! using the [`RefPtr`] and [`WeakPtr`] smart pointer types.
+//!
+//! # Declaring a refcounted struct
+//!
+//! The `#[refcounted]` attribute can be applied to a `struct` declaration to
+//! mark it as refcounted. Refcounted structs are always allocated on the heap,
+//! and are constructed using the `make_refptr` helper macro.
+//!
+//! ## Example
+//!
+//! ```
+//! # use refptr::*;
+//! # use std::cell::Cell;
+//! #[refcounted]
+//! struct HeapInteger {
+//!     value: Cell<i32>,
+//! }
+//!
+//! let orig = make_refptr!(HeapInteger { value: Cell::new(10) });
+//! let copy = orig.clone();
+//! orig.value.set(20);
+//! assert_eq!(copy.value.get(), 20);
+//! ```
+//!
+//! # Allocating
+//!
+//! Structs declared with `#[refcounted]` are constructed on the heap using the
+//! [`make_refptr!`] macro. This macro accepts struct literal syntax, but
+//! constructs the value onto the heap.
+//!
+//! This is required in order to ensure that the type always lives on the heap
+//! for invasive reference counting.
+//!
+//! ## Example
+//!
+//! ```
+//! # use refptr::*;
+//! # #[refcounted] struct HeapPair<T, U> { t: T, u: U }
+//! let ptr = make_refptr!(HeapPair { t: 10, u: 20 });
+//! assert_eq!(ptr.t, 10);
+//! assert_eq!(ptr.u, 20);
+//! ```
+//!
+//! # Finalization and `Drop`
+//!
+//! Types annotated with `#[refcounted]` cannot manually implement `Drop`, as it
+//! would allow recovering a `RefPtr<Self>` while the object is being dropped,
+//! leading to a use-after-free.
+//!
+//! If a finalization method is needed, the `#[refcounted(finalize)]` attribute
+//! provides support for custom finalization. If finalization is enabled, a `fn
+//! finalize(&self)` method is called before dropping any fields.
+//!
+//! It is possible for code to acquire a new strong reference during the
+//! `finalize` method, which may cause the struct to not be dropped after it
+//! returns. Because of this, `finalize` may be called on the same struct
+//! multiple times over it's lifetime.
+//!
+//! # Configuration
+//!
+//! ## `#[refcounted(atomic)]` and `#[refcounted(nonatomic)]`
+//!
+//! Select between atomic reference counting, like [`Arc`], or nonatomic
+//! reference counting, like [`Rc`]. Atomically refcounted types may be shared
+//! between threads, so long as all fields are also sharable.
+//!
+//! The default behaviour is to use nonatomic reference counts.
+//!
+//! ### Example
+//!
+//! ```
+//! # use refptr::*;
+//! # use std::thread;
+//! #[refcounted(atomic)]
+//! struct HeapInt { i: i32 }
+//!
+//! let here = make_refptr!(HeapInt { i: 10 });
+//! let thread = thread::spawn(move || here.i);
+//! assert_eq!(thread.join().unwrap(), 10);
+//! ```
+//!
+//! [`Arc`]: alloc::sync::Arc
+//! [`Rc`]: alloc::rc::Rc
+//!
+//! ## `#[refcounted(weak)]`
+//!
+//! Adds support for weak reference counts and the [`WeakPtr`] smart pointer
+//! type. This annotation may be combined with other annotations.
+//!
+//! ### Example
+//!
+//! ```
+//! # use refptr::*;
+//! # use std::thread;
+//! #[refcounted(atomic, weak)]
+//! struct HeapInt { i: i32 }
+//!
+//! let here = make_refptr!(HeapInt { i: 10 });
+//! let weak = WeakPtr::new(&*here);
+//! assert_eq!(weak.upgrade().unwrap().i, 10);
+//! drop(here);
+//! assert!(weak.upgrade().is_none());
+//! ```
+//!
+//! ## `#[refcounted(finalize)]`
+//!
+//! Calls a `fn finalize(&self)` method on the struct before attempting to
+//! destroy it. See the "Finalization" section for more details. This annotation
+//! may be combined with other annotations.
+//!
+//! Structs which support being referenced using [`RefPtr`] are annotated with the
+//! `#[refcounted(...)]` attribute. This attribute generates the necessary unsafe
+//! code, extra members, and trait implementations required.
+
 #![no_std]
 
 extern crate alloc;
@@ -14,49 +133,7 @@ pub mod control;
 
 /// Attribute for declaring [`Refcounted`] structs.
 ///
-/// The `#[refcounted]` attribute can be applied to a `struct` declaration to
-/// mark it as refcounted. Refcounted structs are always allocated on the heap,
-/// and are constructed using the `make_refptr` helper macro.
-///
-/// # Finalization and `Drop`
-///
-/// Types annotated with this attribute cannot manually implement `Drop`, as it
-/// would allow recovering a `RefPtr<Self>` while the object is being dropped,
-/// leading to a use-after-free.
-///
-/// If a finalization method is needed, the `#[refcounted(finalize)]` attribute
-/// provides support for custom finalization. THis attribute causes a `fn
-/// finalize(&self)` method before dropping any fields. It is possible for code
-/// to acquire a new strong reference during the `finalize` method, which may
-/// cause the struct to not be dropped after it returns. Because of this,
-/// `finalize` may be called on the same struct multiple times over it's
-/// lifetime.
-///
-/// Fields are dropped first-to-last, as in normal structs.
-///
-/// # Options
-///
-/// ## `#[refcounted(atomic)]`
-///
-/// Use atomic reference counting, allowing the struct to to be shared between
-/// threads, so long as other fields implement `Send` and `Sync`.
-///
-/// ## `#[refcounted(nonatomic)]`
-///
-/// (default) Marks the struct as using non-atomic reference counts. Non-atomic
-/// reference counting may be faster than atomic, but structs using it cannot be
-/// shared between threads.
-///
-/// ## `#[refcounted(weak)]`
-///
-/// Adds support for weak reference counts and the [`WeakPtr`] smart pointer
-/// type. This annotation may be combined with other annotations.
-///
-/// ## `#[refcounted(finalize)]`
-///
-/// Calls a `fn finalize(&self)` method on the struct before attempting to
-/// destroy it. See the "Finalization" section for more details. This annotation
-/// may be combined with other annotations.
+/// See the [module level documentation](self) for usage.
 pub use refptr_macros::refcounted;
 
 /// Smart pointer for holding [`Refcounted`] objects.
@@ -140,13 +217,14 @@ impl<T: ?Sized + Refcounted> Drop for RefPtr<T> {
 unsafe impl<T: ?Sized + Refcounted + Sync + Send> Send for RefPtr<T> {}
 unsafe impl<T: ?Sized + Refcounted + Sync + Send> Sync for RefPtr<T> {}
 
-/// A reference counted pointer type for holding refcounted objects.
+/// Weak reference to a [`WeakRefcounted`] object.
 pub struct WeakPtr<T: ?Sized + WeakRefcounted> {
     ptr: NonNull<T>,
     _marker: PhantomData<T>,
 }
 
 impl<T: ?Sized + WeakRefcounted> WeakPtr<T> {
+    /// Obtain a new weak reference to a refcounted object.
     pub fn new(val: &T) -> WeakPtr<T> {
         unsafe {
             T::weak_addref(val);
@@ -158,6 +236,8 @@ impl<T: ?Sized + WeakRefcounted> WeakPtr<T> {
         }
     }
 
+    /// Attempt to upgrade this weak reference into a strong reference,
+    /// returning it.
     pub fn upgrade(&self) -> Option<RefPtr<T>> {
         unsafe {
             let action = T::upgrade(self.ptr.as_ptr());
@@ -209,12 +289,10 @@ impl<T: ?Sized + WeakRefcounted> fmt::Debug for WeakPtr<T> {
 unsafe impl<T: ?Sized + WeakRefcounted + Sync + Send> Send for WeakPtr<T> {}
 unsafe impl<T: ?Sized + WeakRefcounted + Sync + Send> Sync for WeakPtr<T> {}
 
-/// The primary trait of this library. This trait is implemented by objects which
-/// are invasively reference counted. It has a few different constraints put upon
-/// those objects.
+/// An invasively reference counted type.
 ///
-/// Objects of this type are always allocated on the heap, and have their
-/// lifecycle managed using the [`RefPtr`] smart pointer.
+/// Objects implementing this trait are always allocated on the heap, and have
+/// their lifecycle managed using the [`RefPtr`] smart pointer.
 ///
 /// ## Safety
 ///
@@ -253,6 +331,7 @@ pub unsafe trait Refcounted {
     unsafe fn strong_count(this: *const Self) -> usize;
 }
 
+/// An invasively reference counted type supporting weak references.
 pub unsafe trait WeakRefcounted: Refcounted {
     /// Increment the weak reference count of this object.
     ///
