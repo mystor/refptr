@@ -93,6 +93,22 @@ impl<T: ?Sized + Refcounted> RefPtr<T> {
             _marker: PhantomData,
         }
     }
+
+    /// Gets the number of strong references to this allocation.
+    pub fn strong_count(this: &T) -> usize {
+        unsafe { T::strong_count(this) }
+    }
+
+    /// Gets the number of weak references to this allocation.
+    ///
+    /// If there are no remaining strong references, this will
+    /// return `0`.
+    pub fn weak_count(this: &T) -> usize
+    where
+        T: WeakRefcounted,
+    {
+        unsafe { T::weak_count(this) }
+    }
 }
 
 impl<T: ?Sized + Refcounted> Clone for RefPtr<T> {
@@ -143,6 +159,19 @@ impl<T: ?Sized + WeakRefcounted> WeakPtr<T> {
             let action = T::upgrade(self.ptr.as_ptr());
             action.take_action(self.ptr.as_ptr())
         }
+    }
+
+    /// Gets the number of strong references to this allocation.
+    pub fn strong_count(&self) -> usize {
+        unsafe { T::strong_count(self.ptr.as_ptr()) }
+    }
+
+    /// Gets the number of weak references to this allocation.
+    ///
+    /// If there are no remaining strong references, this will
+    /// return `0`.
+    pub fn weak_count(&self) -> usize {
+        unsafe { T::weak_count(self.ptr.as_ptr()) }
     }
 }
 
@@ -215,6 +244,9 @@ pub unsafe trait Refcounted {
     /// Prefer managing the lifecycle of `Refcounted` objects with [`RefPtr`]
     /// over manually calling these methods.
     unsafe fn release(this: *const Self);
+
+    /// Gets the number of strong references to this allocation.
+    unsafe fn strong_count(this: *const Self) -> usize;
 }
 
 pub unsafe trait WeakRefcounted: Refcounted {
@@ -238,6 +270,12 @@ pub unsafe trait WeakRefcounted: Refcounted {
     /// This method will return `UpgradeAction::Upgrade` if the strong reference
     /// count was successfully incremented.
     unsafe fn upgrade(this: *const Self) -> control::UpgradeAction;
+
+    /// Gets the number of weak references to this allocation.
+    ///
+    /// If there are no remaining strong references, this will
+    /// return `0`.
+    unsafe fn weak_count(this: *const Self) -> usize;
 }
 
 // Trait impls for `RefPtr<T>`

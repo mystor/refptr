@@ -140,6 +140,10 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
             unsafe fn release(this: *const Self) {
                 #release.take_action(this)
             }
+
+            unsafe fn strong_count(this: *const Self) -> usize {
+                (*this).refcnt.strong_count()
+            }
         }
     };
 
@@ -159,6 +163,10 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
                 #[inline]
                 unsafe fn upgrade(this: *const Self) -> ::refptr::control::UpgradeAction {
                     (*this).refcnt.upgrade()
+                }
+
+                unsafe fn weak_count(this: *const Self) -> usize {
+                    (*this).refcnt.weak_count()
                 }
             }
         }
