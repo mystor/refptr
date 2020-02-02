@@ -5,12 +5,17 @@
 use crate::{RefPtr, Refcounted};
 use alloc::boxed::Box;
 use alloc::rc::Rc;
-use alloc::sync::Arc;
 use core::cell::Cell;
 use core::fmt;
 use core::marker::PhantomData;
 use core::mem::ManuallyDrop;
-use core::sync::atomic::{self, AtomicUsize, Ordering};
+use core::sync::atomic::Ordering;
+
+#[cfg(feature = "atomic")]
+use alloc::sync::Arc;
+
+#[cfg(feature = "atomic")]
+use core::sync::atomic::{self, AtomicUsize};
 
 /// A soft limit on the amount of references that may be made to an
 /// AtomicRefcnt.
@@ -202,7 +207,9 @@ macro_rules! decl_control {
 
 decl_control!(Refcnt, Rc, [Cell<usize>]);
 decl_control!(RefcntWeak, Rc, [Cell<usize>, Cell<usize>]);
+#[cfg(feature = "atomic")]
 decl_control!(AtomicRefcnt, Arc, [AtomicUsize]);
+#[cfg(feature = "atomic")]
 decl_control!(AtomicRefcntWeak, Arc, [AtomicUsize, AtomicUsize]);
 
 /// Internal trait for abstracting over `AtomicUsize`, `Cell<usize>`, and `()`.
@@ -216,6 +223,7 @@ trait IncDecCount {
     fn fence(order: Ordering);
 }
 
+#[cfg(feature = "atomic")]
 impl IncDecCount for AtomicUsize {
     fn new() -> Self {
         AtomicUsize::new(1)
@@ -373,6 +381,7 @@ impl<T: IncDecCount, W: IncDecCount> RefcntImpl<T, W> {
     }
 }
 
+#[cfg(feature = "atomic")]
 impl RefcntImpl<AtomicUsize, ()> {
     unsafe fn dec_strong_finalize(
         &self,
@@ -405,6 +414,7 @@ impl RefcntImpl<AtomicUsize, ()> {
     }
 }
 
+#[cfg(feature = "atomic")]
 impl RefcntImpl<AtomicUsize, AtomicUsize> {
     /// Attempt to upgrade a weak reference to a strong reference by
     /// incrementing the strong reference count. If this method returns `true`,

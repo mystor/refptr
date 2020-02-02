@@ -11,7 +11,7 @@ matrix:
       install:
         - rustup target add thumbv6m-none-eabi
       script:
-        - cargo build --target=thumbv6m-none-eabi
+        - cargo build --target=thumbv6m-none-eabi --no-default-features
     - name: "miri"
       install:
         - MIRI_NIGHTLY=nightly-$(curl -s https://rust-lang.github.io/rustup-components-history/x86_64-unknown-linux-gnu/miri)
@@ -25,6 +25,7 @@ matrix:
 
 script:
   - RUST_BACKTRACE=1 cargo test
+  - RUST_BACKTRACE=1 cargo build --no-default-features
 
 notifications:
   email:

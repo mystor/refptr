@@ -11,6 +11,10 @@ license = "MIT"
 keywords = ["refcounted", "arc", "rc", "sync", "data-structure"]
 categories = ["concurrency", "data-structures", "no-std"]
 
+[features]
+default = ["atomic"]
+atomic = []
+
 [workspace]
 members = ["macros"]
 
