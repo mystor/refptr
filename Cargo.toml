@@ -1,11 +1,18 @@
 [package]
-name = "rcptr"
+name = "refptr"
 version = "0.1.0"
 authors = ["Nika Layzell <nika@thelayzells.com>"]
 edition = "2018"
 
+description = "Inherently reference counted structs"
+repository = "https://github.com/mystor/refptr"
+readme = "README.md"
+license = "MIT"
+keywords = ["refcounted", "arc", "rc", "sync", "data-structure"]
+categories = ["concurrency", "data-structures"]
+
 [workspace]
-members = ["rcptr-macros"]
+members = ["macros"]
 
 [dependencies]
-rcptr-macros = { version = "0.1.0", path = "rcptr-macros" }
+refptr-macros = { version = "0.1.0", path = "macros" }

@@ -87,10 +87,10 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
 
     let name = item.ident.clone();
     let rc_field_ty: Type = match (cfg.rc_kind, cfg.weak_kind) {
-        (RcKind::Nonatomic, WeakKind::NonWeak) => parse_quote!(::rcptr::control::Refcnt<Self>),
-        (RcKind::Atomic, WeakKind::NonWeak) => parse_quote!(::rcptr::control::AtomicRefcnt<Self>),
-        (RcKind::Nonatomic, WeakKind::Weak) => parse_quote!(::rcptr::control::RefcntWeak<Self>),
-        (RcKind::Atomic, WeakKind::Weak) => parse_quote!(::rcptr::control::AtomicRefcntWeak<Self>),
+        (RcKind::Nonatomic, WeakKind::NonWeak) => parse_quote!(::refptr::control::Refcnt<Self>),
+        (RcKind::Atomic, WeakKind::NonWeak) => parse_quote!(::refptr::control::AtomicRefcnt<Self>),
+        (RcKind::Nonatomic, WeakKind::Weak) => parse_quote!(::refptr::control::RefcntWeak<Self>),
+        (RcKind::Atomic, WeakKind::Weak) => parse_quote!(::refptr::control::AtomicRefcntWeak<Self>),
     };
 
     // Add our refcnt field, and extract the original fields
@@ -139,7 +139,7 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
     };
 
     let impl_refcounted = quote! {
-        unsafe impl #impl_generics ::rcptr::Refcounted for #name #ty_generics #where_clause {
+        unsafe impl #impl_generics ::refptr::Refcounted for #name #ty_generics #where_clause {
             #[inline]
             unsafe fn addref(&self) {
                 self.refcnt.inc_strong()
@@ -154,7 +154,7 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
 
     let impl_weak = if cfg.weak_kind == WeakKind::Weak {
         quote! {
-            unsafe impl #impl_generics ::rcptr::WeakRefcounted for #name #ty_generics #where_clause {
+            unsafe impl #impl_generics ::refptr::WeakRefcounted for #name #ty_generics #where_clause {
                 #[inline]
                 unsafe fn weak_addref(this: *const Self) {
                     (*this).refcnt.inc_weak()
@@ -166,7 +166,7 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
                 }
 
                 #[inline]
-                unsafe fn upgrade(this: *const Self) -> ::rcptr::control::UpgradeAction {
+                unsafe fn upgrade(this: *const Self) -> ::refptr::control::UpgradeAction {
                     (*this).refcnt.upgrade()
                 }
             }

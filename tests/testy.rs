@@ -1,4 +1,4 @@
-use rcptr::{make_refptr, refcounted, RefPtr};
+use refptr::{make_refptr, refcounted, RefPtr};
 
 #[refcounted]
 struct MyStruct {

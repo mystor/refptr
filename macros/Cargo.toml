@@ -1,14 +1,13 @@
 [package]
-name = "rcptr-macros"
+name = "refptr-macros"
 version = "0.1.0"
 authors = ["Nika Layzell <nika@thelayzells.com>"]
 edition = "2018"
 
-description = "Procedural macros for the 'rcptr' crate"
-repository = "https://github.com/mystor/rcptr"
-readme = "README.md"
+description = "Procedural macros for the 'refptr' crate"
+repository = "https://github.com/mystor/refptr"
 license = "MIT"
-keywords = ["macros", "refcounted", "arc", "rc"]
+keywords = ["macros", "refcounted", "arc", "rc", "sync", "data-structure"]
 
 include = ["src/**/*", "Cargo.toml", "README.md"]
 

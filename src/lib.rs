@@ -53,7 +53,7 @@ pub mod control;
 /// Calls a `fn finalize(&self)` method on the struct before attempting to
 /// destroy it. See the "Finalization" section for more details. This annotation
 /// may be combined with other annotations.
-pub use rcptr_macros::refcounted;
+pub use refptr_macros::refcounted;
 
 /// Smart pointer for holding [`Refcounted`] objects.
 pub struct RefPtr<T: ?Sized + Refcounted> {
@@ -322,7 +322,7 @@ pub mod __rt {
 /// # Example
 ///
 /// ```
-/// # use rcptr::*;
+/// # use refptr::*;
 /// #[refcounted]
 /// struct HeapInt { value: i32 }
 ///
