@@ -1,15 +1,15 @@
-# rcptr
+# refptr
 
-[![Latest Version](https://img.shields.io/crates/v/rcptr.svg)](https://crates.io/crates/rcptr)
-[![Documentation](https://docs.rs/rcptr/badge.svg)](https://docs.rs/rcptr)
-[![Build Status](https://travis-ci.org/mystor/rcptr.svg?branch=master)](https://travis-ci.org/mystor/rcptr)
+[![Latest Version](https://img.shields.io/crates/v/refptr.svg)](https://crates.io/crates/refptr)
+[![Documentation](https://docs.rs/refptr/badge.svg)](https://docs.rs/refptr)
+[![Build Status](https://travis-ci.org/mystor/refptr.svg?branch=master)](https://travis-ci.org/mystor/refptr)
 
 Macros, attributes, and traits for invasively reference-counted structs in Rust.
 See the documentation for more details.
 
 ## Usage
 
-Structs which support being referenced using `RcPtr` are annotated with the
+Structs which support being referenced using `RefPtr` are annotated with the
 `#[refcounted(...)]` attribute. This attribute generates the necessary unsafe
 code, extra members, and trait implementations required.
 

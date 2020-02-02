@@ -1,4 +1,4 @@
-# rcptr-macros
+# refptr-macros
 
 This crate is an internal procedural macro helper crate for the
-[`rcptr`](https://crates.io/crates/rcptr) crate.
+[`refptr`](https://crates.io/crates/refptr) crate.
