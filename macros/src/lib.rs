@@ -127,7 +127,10 @@ fn refcounted_impl(args: AttributeArgs, mut item: DeriveInput) -> Result<TokenSt
 
     let release = if cfg.has_finalize {
         quote! {
-            (*this).refcnt.dec_strong_finalize(#drop_fields, || (*this).finalize())
+            (*this).refcnt.dec_strong_finalize(#drop_fields, || {
+                let _: fn (this: &Self) = Self::finalize; // Ensure the signature is correct
+                Self::finalize(&*this);
+            })
         }
     } else {
         quote! {

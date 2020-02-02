@@ -116,6 +116,29 @@
 //! Structs which support being referenced using [`RefPtr`] are annotated with the
 //! `#[refcounted(...)]` attribute. This attribute generates the necessary unsafe
 //! code, extra members, and trait implementations required.
+//!
+//! ```
+//! # use refptr::*;
+//! # use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+//! #[refcounted(finalize)]
+//! struct FinalizeExample {}
+//!
+//! static FINALIZED: AtomicBool = AtomicBool::new(false);
+//! impl FinalizeExample {
+//!     fn finalize(&self) {
+//!         FINALIZED.store(true, SeqCst);
+//!     }
+//! }
+//!
+//! let orig = make_refptr!(FinalizeExample {});
+//! assert_eq!(FINALIZED.load(SeqCst), false);
+//! let copy = orig.clone();
+//! assert_eq!(FINALIZED.load(SeqCst), false);
+//! drop(orig);
+//! assert_eq!(FINALIZED.load(SeqCst), false);
+//! drop(copy);
+//! assert_eq!(FINALIZED.load(SeqCst), true);
+//! ```
 
 #![no_std]
 
