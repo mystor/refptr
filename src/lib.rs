@@ -302,7 +302,7 @@ impl<T: ?Sized + Refcounted> From<&T> for RefPtr<T> {
 }
 
 // Not public API.
-#[doc(ignore)]
+#[doc(hidden)]
 pub mod __rt {
     use crate::{RefPtr, Refcounted};
     pub use std::mem::ManuallyDrop;

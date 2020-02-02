@@ -70,8 +70,8 @@ pub trait ControlBlock {
 
 macro_rules! decl_control {
     ($name:ident, $atomic:ident, [$strong:ty $(, $weak:ty)?]) => {
-        /// Reference counting control block used by the
-        /// [`#[refcounted]`](`crate::refcounted`) macro.
+        /// Reference counting control block used by the `#[refcounted]`
+        /// attribute.
         pub struct $name<T: ?Sized> {
             inner: RefcntImpl<$strong $(, $weak)?>,
             // This marker is required to limit the type to only be `Sync` if
@@ -369,10 +369,12 @@ impl RefcntImpl<AtomicUsize, ()> {
         }
 
         // We are the last remaining reference to the object. Stabilize the
-        // refcount to `1` to invoke `finalize`. The `Acquire` load will ensure
-        // writes from other threads are visible during the finalizer.
-        let acq = self.strong.fetch_add(1, Ordering::Acquire);
-        debug_assert!(acq == 0, "no other references exist");
+        // refcount to `1` to invoke `finalize`.
+        self.strong.store(1, Ordering::Relaxed);
+
+        // We perform an `Acquire` fence here to ensure writes from other
+        // threads are visible in `finalize`.
+        atomic::fence(Ordering::Acquire);
 
         // PANIC: If `finalize` panics, memory controlled by this operation will
         // be leaked.
@@ -456,24 +458,10 @@ impl RefcntImpl<AtomicUsize, AtomicUsize> {
         // be leaked.
         finalize();
 
-        // We won't need to finalize again, so can use `fetch_sub` for the real
-        // decrement.
-        let old_count = self.strong.fetch_sub(1, Ordering::Release);
-        if old_count != 1 {
-            return FreeAction::None;
-        }
-
-        // The strong count is officially `0`. Perform one last acquire fence to
-        // ensure new writes are visible to destructors.
-        atomic::fence(Ordering::Acquire);
-
-        // PANIC: If `drop_fields` panics, memory controlled by this operation
-        // will be leaked.
-        drop_fields();
-
-        // Finally, drop the implicit weak reference held due to a non-zero
-        // strong reference.
-        self.dec_weak()
+        // We've already finalized, so can drop our reference like normal.
+        // Use the standard codepath, as `finalize` may have acquired a new
+        // reference.
+        self.dec_strong(drop_fields)
     }
 }
 
