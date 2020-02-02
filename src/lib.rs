@@ -1,10 +1,14 @@
-use std::cmp::Ordering;
-use std::fmt;
-use std::hash::{Hash, Hasher};
-use std::marker::PhantomData;
-use std::mem;
-use std::ops::Deref;
-use std::ptr::NonNull;
+#![no_std]
+
+extern crate alloc;
+
+use core::cmp::Ordering;
+use core::fmt;
+use core::hash::{Hash, Hasher};
+use core::marker::PhantomData;
+use core::mem;
+use core::ops::Deref;
+use core::ptr::NonNull;
 
 pub mod control;
 
@@ -346,7 +350,8 @@ impl<T: ?Sized + Refcounted> From<&T> for RefPtr<T> {
 #[doc(hidden)]
 pub mod __rt {
     use crate::{RefPtr, Refcounted};
-    pub use std::mem::ManuallyDrop;
+    use alloc::boxed::Box;
+    pub use core::mem::ManuallyDrop;
 
     pub unsafe fn alloc<T: Refcounted>(value: ManuallyDrop<T>) -> RefPtr<T> {
         RefPtr::from_raw(Box::into_raw(Box::new(value)) as *mut T)

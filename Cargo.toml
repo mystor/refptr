@@ -9,7 +9,7 @@ repository = "https://github.com/mystor/refptr"
 readme = "README.md"
 license = "MIT"
 keywords = ["refcounted", "arc", "rc", "sync", "data-structure"]
-categories = ["concurrency", "data-structures"]
+categories = ["concurrency", "data-structures", "no-std"]
 
 [workspace]
 members = ["macros"]

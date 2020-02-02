@@ -3,14 +3,14 @@
 //! generally shouldn't be used by users of this crate.
 
 use crate::{RefPtr, Refcounted};
-use std::cell::Cell;
-use std::fmt;
-use std::marker::PhantomData;
-use std::mem::ManuallyDrop;
-use std::process::abort;
-use std::rc::Rc;
-use std::sync::atomic::{self, AtomicUsize, Ordering};
-use std::sync::Arc;
+use alloc::boxed::Box;
+use alloc::rc::Rc;
+use alloc::sync::Arc;
+use core::cell::Cell;
+use core::fmt;
+use core::marker::PhantomData;
+use core::mem::ManuallyDrop;
+use core::sync::atomic::{self, AtomicUsize, Ordering};
 
 /// A soft limit on the amount of references that may be made to an
 /// AtomicRefcnt.
@@ -18,6 +18,24 @@ use std::sync::Arc;
 /// Going above this limit will abort your program (although not necessarily) at
 /// _exactly_ `MAX_REFCOUNT + 1` references.
 const MAX_REFCOUNT: usize = isize::max_value() as usize;
+
+// `std::process::abort` isn't available with no_std, and
+// `core::intrinsics::abort` is perma-unstable. Double-panics are unrecoverable,
+// so use one to ensure we exit.
+//
+// XXX: Make this use `std::process::abort` if a `std` feature is added?
+#[inline(never)]
+#[cold]
+fn abort() -> ! {
+    struct Bomb;
+    impl Drop for Bomb {
+        fn drop(&mut self) {
+            panic!("double-panicing to force abort");
+        }
+    }
+    let _bomb = Bomb;
+    panic!("aborting due to excessively large reference count");
+}
 
 #[must_use]
 #[derive(Eq, PartialEq, Debug)]
