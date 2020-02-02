@@ -3,8 +3,8 @@ extern crate proc_macro;
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{
-    parse_macro_input, parse_quote, AttributeArgs, Error, Field, Fields, ItemStruct, Type,
-    Visibility,
+    parse_macro_input, parse_quote, AttributeArgs, Data, DataStruct, DeriveInput, Error, Field,
+    Fields, Type, Visibility,
 };
 
 macro_rules! fail {
@@ -76,7 +76,7 @@ fn parse_config(args: AttributeArgs) -> Result<Config, Error> {
     })
 }
 
-fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStream, Error> {
+fn refcounted_impl(args: AttributeArgs, mut item: DeriveInput) -> Result<TokenStream, Error> {
     let cfg = parse_config(args)?;
 
     let name = item.ident.clone();
@@ -89,8 +89,11 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
 
     // Add our refcnt field, and extract the original fields
     let orig_fields;
-    match &mut item.fields {
-        Fields::Named(fields) => {
+    match &mut item.data {
+        Data::Struct(DataStruct {
+            fields: Fields::Named(fields),
+            ..
+        }) => {
             orig_fields = fields.named.clone();
 
             let rc_field = Field {
@@ -102,7 +105,10 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
             };
             fields.named.insert(0, rc_field);
         }
-        _ => fail!(item, "refcounted struct must have named fields"),
+        _ => fail!(
+            item,
+            "refcounted must be used on a struct with named fields"
+        ),
     }
 
     let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
@@ -198,7 +204,7 @@ pub fn refcounted(
     input: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
     let args = parse_macro_input!(args as AttributeArgs);
-    let input = parse_macro_input!(input as ItemStruct);
+    let input = parse_macro_input!(input as DeriveInput);
 
     match refcounted_impl(args, input) {
         Ok(ts) => ts.into(),
