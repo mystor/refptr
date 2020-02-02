@@ -2,15 +2,14 @@ extern crate proc_macro;
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::spanned::Spanned;
 use syn::{
-    parse_macro_input, parse_quote, AttributeArgs, Error, Field, Fields, ItemStruct, Meta,
-    NestedMeta, Type, Visibility,
+    parse_macro_input, parse_quote, AttributeArgs, Error, Field, Fields, ItemStruct, Type,
+    Visibility,
 };
 
 macro_rules! fail {
     ($ts:expr, $err:expr) => {
-        return Err(Error::new($ts.span(), $err));
+        return Err(Error::new_spanned($ts, $err));
     };
 }
 
@@ -39,36 +38,31 @@ fn parse_config(args: AttributeArgs) -> Result<Config, Error> {
     let mut has_finalize = false;
 
     for arg in args {
+        use syn::{Meta::*, NestedMeta::*};
         match arg {
-            NestedMeta::Meta(Meta::Word(word)) => {
-                let name = word.to_string();
-                match &name[..] {
-                    "atomic" => {
-                        if rc_kind.is_some() {
-                            fail!(word, "duplicate atomicity argument");
-                        }
-                        rc_kind = Some(RcKind::Atomic);
-                    }
-                    "nonatomic" => {
-                        if rc_kind.is_some() {
-                            fail!(word, "duplicate atomicity argument");
-                        }
-                        rc_kind = Some(RcKind::Nonatomic);
-                    }
-                    "weak" => {
-                        if weak_kind == WeakKind::Weak {
-                            fail!(word, "duplicate weak argument");
-                        }
-                        weak_kind = WeakKind::Weak;
-                    }
-                    "finalize" => {
-                        if has_finalize {
-                            fail!(word, "duplicate finalize argument");
-                        }
-                        has_finalize = true;
-                    }
-                    _ => fail!(word, "unexpected refcounted argument"),
+            Meta(Path(path)) if path.is_ident("atomic") => {
+                if rc_kind.is_some() {
+                    fail!(path, "duplicate atomicity argument");
                 }
+                rc_kind = Some(RcKind::Atomic);
+            }
+            Meta(Path(path)) if path.is_ident("nonatomic") => {
+                if rc_kind.is_some() {
+                    fail!(path, "duplicate atomicity argument");
+                }
+                rc_kind = Some(RcKind::Nonatomic);
+            }
+            Meta(Path(path)) if path.is_ident("weak") => {
+                if weak_kind == WeakKind::Weak {
+                    fail!(path, "duplicate weak argument");
+                }
+                weak_kind = WeakKind::Weak;
+            }
+            Meta(Path(path)) if path.is_ident("finalize") => {
+                if has_finalize {
+                    fail!(path, "duplicate finalize argument");
+                }
+                has_finalize = true;
             }
             meta => fail!(meta, "unexpected refcounted argument"),
         }
@@ -114,27 +108,24 @@ fn refcounted_impl(args: AttributeArgs, mut item: ItemStruct) -> Result<TokenStr
     let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
 
     // drop_in_place each non-added field in the struct.
-    let drop_fields = orig_fields
-        .iter()
-        .map(|field| {
-            let name = &field.ident;
-            let ty = &field.ty;
-            quote! {
-                ::std::ptr::drop_in_place((&(*this).#name) as *const #ty as *mut #ty);
-            }
-        })
-        .collect::<TokenStream>();
+    let drop_each_field = orig_fields.iter().map(|field| {
+        let name = &field.ident;
+        quote! {
+            ::std::ptr::drop_in_place(&mut (*this).#name);
+        }
+    });
+    let drop_fields = quote!(|| {
+        let this = this as *mut Self;
+        #(#drop_each_field)*
+    });
 
     let release = if cfg.has_finalize {
         quote! {
-            (*this).refcnt.dec_strong_finalize(
-                || { #drop_fields },
-                || (*this).finalize(),
-            )
+            (*this).refcnt.dec_strong_finalize(#drop_fields, || (*this).finalize())
         }
     } else {
         quote! {
-            (*this).refcnt.dec_strong(|| { #drop_fields })
+            (*this).refcnt.dec_strong(#drop_fields)
         }
     };
 
