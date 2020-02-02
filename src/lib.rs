@@ -6,7 +6,6 @@ use std::mem;
 use std::ops::Deref;
 use std::ptr::NonNull;
 
-
 pub mod control;
 
 /// Attribute for declaring [`Refcounted`] structs.
@@ -149,7 +148,9 @@ impl<T: ?Sized + WeakRefcounted> WeakPtr<T> {
 
 impl<T: ?Sized + WeakRefcounted> Clone for WeakPtr<T> {
     fn clone(&self) -> Self {
-        unsafe { T::weak_addref(self.ptr.as_ptr()); }
+        unsafe {
+            T::weak_addref(self.ptr.as_ptr());
+        }
 
         WeakPtr {
             ptr: self.ptr,
@@ -160,7 +161,9 @@ impl<T: ?Sized + WeakRefcounted> Clone for WeakPtr<T> {
 
 impl<T: ?Sized + WeakRefcounted> Drop for WeakPtr<T> {
     fn drop(&mut self) {
-        unsafe { T::weak_release(self.ptr.as_ptr()); }
+        unsafe {
+            T::weak_release(self.ptr.as_ptr());
+        }
     }
 }
 
