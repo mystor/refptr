@@ -16,7 +16,7 @@
 //! ```
 //! # use refptr::*;
 //! # use std::cell::Cell;
-//! #[refcounted]
+//! #[refcounted(local)]
 //! struct HeapInteger {
 //!     value: Cell<i32>,
 //! }
@@ -40,7 +40,7 @@
 //!
 //! ```
 //! # use refptr::*;
-//! # #[refcounted] struct HeapPair<T, U> { t: T, u: U }
+//! # #[refcounted(local)] struct HeapPair<T, U> { t: T, u: U }
 //! let ptr = make_refptr!(HeapPair { t: 10, u: 20 });
 //! assert_eq!(ptr.t, 10);
 //! assert_eq!(ptr.u, 20);
@@ -63,13 +63,13 @@
 //!
 //! # Configuration
 //!
-//! ## `#[refcounted(atomic)]` and `#[refcounted(nonatomic)]`
+//! ## `#[refcounted(atomic)]` and `#[refcounted(local)]`
 //!
-//! Select between atomic reference counting, like [`Arc`], or nonatomic
+//! Select between atomic reference counting, like [`Arc`], or thread local
 //! reference counting, like [`Rc`]. Atomically refcounted types may be shared
 //! between threads, so long as all fields are also sharable.
 //!
-//! The default behaviour is to use nonatomic reference counts.
+//! The atomicity of the refcount must be specified.
 //!
 //! ### Example
 //!
@@ -120,7 +120,7 @@
 //! ```
 //! # use refptr::*;
 //! # use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
-//! #[refcounted(finalize)]
+//! #[refcounted(atomic, finalize)]
 //! struct FinalizeExample {}
 //!
 //! static FINALIZED: AtomicBool = AtomicBool::new(false);
@@ -258,7 +258,25 @@ impl<T: ?Sized + Refcounted> Drop for RefPtr<T> {
 unsafe impl<T: ?Sized + Refcounted + Sync + Send> Send for RefPtr<T> {}
 unsafe impl<T: ?Sized + Refcounted + Sync + Send> Sync for RefPtr<T> {}
 
-/// Weak reference to a [`WeakRefcounted`] object.
+/// Weak reference to a [`Refcounted`] object.
+///
+/// Weak pointers can only be used on objects which have refcounts supporting
+/// weak references.
+///
+/// # Example
+///
+/// ```
+/// # use refptr::*;
+/// # use std::thread;
+/// #[refcounted(atomic, weak)]
+/// struct HeapInt { i: i32 }
+///
+/// let here = make_refptr!(HeapInt { i: 10 });
+/// let weak = WeakPtr::new(&*here);
+/// assert_eq!(weak.upgrade().unwrap().i, 10);
+/// drop(here);
+/// assert!(weak.upgrade().is_none());
+/// ```
 pub struct WeakPtr<T: ?Sized>
 where
     T: Refcounted,
@@ -432,7 +450,7 @@ impl<T: ?Sized + Refcounted> From<&T> for RefPtr<T> {
 ///
 /// ```
 /// # use refptr::*;
-/// #[refcounted]
+/// #[refcounted(local)]
 /// struct HeapInt { value: i32 }
 ///
 /// let ptr = make_refptr!(HeapInt { value: 10 });

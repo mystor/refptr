@@ -1,6 +1,6 @@
 extern crate proc_macro;
 
-use proc_macro2::TokenStream;
+use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::{
     parse_macro_input, parse_quote, AttributeArgs, Data, DataStruct, DeriveInput, Error, Field,
@@ -74,12 +74,18 @@ fn parse_config(args: AttributeArgs) -> Result<Config, Error> {
         }
     }
 
-    let rc_kind = rc_kind.unwrap_or(RcKind::Local);
-    Ok(Config {
-        rc_kind,
-        weak_kind,
-        finalize_kind,
-    })
+    if let Some(rc_kind) = rc_kind {
+        Ok(Config {
+            rc_kind,
+            weak_kind,
+            finalize_kind,
+        })
+    } else {
+        return Err(Error::new(
+            Span::call_site(),
+            "must specify either `local` or `atomic` atomicity",
+        ));
+    }
 }
 
 fn refcounted_impl(args: AttributeArgs, mut item: DeriveInput) -> Result<TokenStream, Error> {
