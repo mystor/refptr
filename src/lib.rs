@@ -175,6 +175,7 @@ pub use refptr_macros::refcounted;
 ///  * `Refcounted` objects are always heap-allocated
 ///  * Only shared references may exist to `Refcounted` objects
 pub unsafe trait Refcounted {
+    /// Reference count used by this type.
     type Rc: Refcount;
 
     /// Metadata used internally by `Refcount` implementations.
@@ -184,12 +185,14 @@ pub unsafe trait Refcounted {
     unsafe fn refcount_metadata(&self) -> <Self::Rc as Refcount>::Metadata;
 }
 
+/// Strong reference to a [`Refcounted`] object.
 pub struct RefPtr<T: ?Sized + Refcounted> {
     ptr: NonNull<Inner<T>>,
     _marker: PhantomData<T>,
 }
 
 impl<T: ?Sized + Refcounted> RefPtr<T> {
+    /// Obtain a strong reference to a `Refcounted` object.
     pub fn new(val: &T) -> RefPtr<T> {
         unsafe {
             let ptr = Inner::cast(val as *const T as *mut T);
@@ -198,31 +201,18 @@ impl<T: ?Sized + Refcounted> RefPtr<T> {
         }
     }
 
+    /// Recover a `RefPtr` from a raw pointer which was previously returned from
+    /// `into_raw`. This does not increment the reference count.
     pub unsafe fn from_raw(val: *const T) -> RefPtr<T> {
         RefPtr::from_inner(Inner::cast(val as *mut T))
     }
 
+    /// Acquire a raw pointer to the allocation, consuming the `RefPtr`.
     pub fn into_raw(this: Self) -> *const T {
         let ptr = this.deref() as *const T;
         mem::forget(this);
         ptr
     }
-
-    // /// Gets the number of strong references to this allocation.
-    // pub fn strong_count(this: &T) -> usize {
-    //     unsafe { self.refcnt().strong_count() }
-    // }
-
-    // /// Gets the number of weak references to this allocation.
-    // ///
-    // /// If there are no remaining strong references, this will
-    // /// return `0`.
-    // pub fn weak_count(this: &T) -> usize
-    // where
-    //     T::Rc: WeakRefcount,
-    // {
-    //     unsafe { this.refcnt().weak_count() }
-    // }
 
     unsafe fn from_inner(ptr: *mut Inner<T>) -> RefPtr<T> {
         RefPtr {

@@ -383,10 +383,8 @@ impl IncDecCount for Cell<usize> {
         let prev = self.get();
 
         // Guard against excessively-large reference counts.
-        if prev > MAX_REFCOUNT - 1 {
-            abort();
-        }
-        self.set(prev + 1);
+        let next = prev.checked_add(1).unwrap_or_else(|| abort());
+        self.set(next);
         prev
     }
 
