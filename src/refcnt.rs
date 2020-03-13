@@ -191,8 +191,7 @@ macro_rules! metadata_type {
 
 macro_rules! decl_refcnt {
     ($name:ident, [$strong:ty $(, $weak:ty)?] $(, $finalize:ident)?) => {
-        /// Reference counting control block used by the `#[refcounted]`
-        /// attribute.
+        /// Reference count type used by the `#[refcounted]` attribute.
         pub struct $name {
             inner: RefcntImpl<$strong $(, $weak)?>,
         }

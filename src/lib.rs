@@ -139,6 +139,41 @@
 //! drop(copy);
 //! assert_eq!(FINALIZED.load(SeqCst), true);
 //! ```
+//!
+//! # Trait Objects
+//!
+//! `#[refcounted]` can also be used for managing the lifecycles of trait
+//! objects, by including the `Refcounted` trait in your trait object's
+//! hierarchy. The `Rc` associated type will need to be specified in order to
+//! maintain object safety.
+//!
+//! The [`refcnt`] module contains the specific reference count types used by
+//! this crate.
+//!
+//! ## Example
+//!
+//! ```
+//! # use refptr::*;
+//! trait MyTrait : Refcounted<Rc = refcnt::AtomicWeak> {
+//!     fn my_trait_method(&self) -> i32;
+//! }
+//!
+//! #[refcounted(atomic, weak)]
+//! struct MyStruct { i: i32 }
+//!
+//! impl MyTrait for MyStruct {
+//!     fn my_trait_method(&self) -> i32 { self.i }
+//! }
+//!
+//! fn takes_trait_object(obj: &dyn MyTrait) -> i32 {
+//!     let strong_ref: RefPtr<dyn MyTrait> = RefPtr::new(obj);
+//!     strong_ref.my_trait_method()
+//! }
+//!
+//! let concrete = make_refptr!(MyStruct { i: 10 });
+//! let i = takes_trait_object(&*concrete);
+//! assert_eq!(i, 10);
+//! ```
 
 #![no_std]
 
