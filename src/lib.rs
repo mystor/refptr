@@ -152,165 +152,18 @@ use core::mem;
 use core::ops::Deref;
 use core::ptr::NonNull;
 
-pub mod control;
+pub mod refcnt;
+use refcnt::{Inner, Refcount, UpgradeAction, WeakRefcount};
+
+// Not public API.
+#[doc(hidden)]
+#[path = "runtime.rs"]
+pub mod __rt;
 
 /// Attribute for declaring [`Refcounted`] structs.
 ///
 /// See the [module level documentation](self) for usage.
 pub use refptr_macros::refcounted;
-
-/// Smart pointer for holding [`Refcounted`] objects.
-pub struct RefPtr<T: ?Sized + Refcounted> {
-    ptr: NonNull<T>,
-    _marker: PhantomData<T>,
-}
-
-impl<T: ?Sized + Refcounted> RefPtr<T> {
-    /// Acquire a strong reference to the passed-in object.
-    pub fn new(val: &T) -> RefPtr<T> {
-        unsafe {
-            val.addref();
-            RefPtr::from_raw(val)
-        }
-    }
-
-    /// Consumes the `RefPtr`, returning the wrapped pointer.
-    ///
-    /// To avoid a leak, the pointer must be turned back into an `RefPtr` using
-    /// [`RefPtr::from_raw`].
-    pub fn into_raw(this: RefPtr<T>) -> *const T {
-        let ptr = this.ptr.as_ptr();
-        mem::forget(this);
-        ptr
-    }
-
-    /// Constructs a `RefPtr` from this pointer.
-    ///
-    /// The raw pointer must have been returned from `RefPtr::into_raw`.
-    ///
-    /// This function is unsafe because improper use may lead to memory
-    /// problems. For example, a double-free may occur if the function is called
-    /// twice on the same raw pointer.
-    pub unsafe fn from_raw(raw: *const T) -> RefPtr<T> {
-        RefPtr {
-            ptr: NonNull::new_unchecked(raw as *mut T),
-            _marker: PhantomData,
-        }
-    }
-
-    /// Gets the number of strong references to this allocation.
-    pub fn strong_count(this: &T) -> usize {
-        unsafe { T::strong_count(this) }
-    }
-
-    /// Gets the number of weak references to this allocation.
-    ///
-    /// If there are no remaining strong references, this will
-    /// return `0`.
-    pub fn weak_count(this: &T) -> usize
-    where
-        T: WeakRefcounted,
-    {
-        unsafe { T::weak_count(this) }
-    }
-}
-
-impl<T: ?Sized + Refcounted> Clone for RefPtr<T> {
-    fn clone(&self) -> Self {
-        RefPtr::new(&self)
-    }
-}
-
-impl<T: ?Sized + Refcounted> Deref for RefPtr<T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        unsafe { self.ptr.as_ref() }
-    }
-}
-
-impl<T: ?Sized + Refcounted> Drop for RefPtr<T> {
-    fn drop(&mut self) {
-        unsafe {
-            T::release(self.ptr.as_ptr());
-        }
-    }
-}
-
-unsafe impl<T: ?Sized + Refcounted + Sync + Send> Send for RefPtr<T> {}
-unsafe impl<T: ?Sized + Refcounted + Sync + Send> Sync for RefPtr<T> {}
-
-/// Weak reference to a [`WeakRefcounted`] object.
-pub struct WeakPtr<T: ?Sized + WeakRefcounted> {
-    ptr: NonNull<T>,
-    _marker: PhantomData<T>,
-}
-
-impl<T: ?Sized + WeakRefcounted> WeakPtr<T> {
-    /// Obtain a new weak reference to a refcounted object.
-    pub fn new(val: &T) -> WeakPtr<T> {
-        unsafe {
-            T::weak_addref(val);
-
-            WeakPtr {
-                ptr: val.into(),
-                _marker: PhantomData,
-            }
-        }
-    }
-
-    /// Attempt to upgrade this weak reference into a strong reference,
-    /// returning it.
-    pub fn upgrade(&self) -> Option<RefPtr<T>> {
-        unsafe {
-            let action = T::upgrade(self.ptr.as_ptr());
-            action.take_action(self.ptr.as_ptr())
-        }
-    }
-
-    /// Gets the number of strong references to this allocation.
-    pub fn strong_count(&self) -> usize {
-        unsafe { T::strong_count(self.ptr.as_ptr()) }
-    }
-
-    /// Gets the number of weak references to this allocation.
-    ///
-    /// If there are no remaining strong references, this will
-    /// return `0`.
-    pub fn weak_count(&self) -> usize {
-        unsafe { T::weak_count(self.ptr.as_ptr()) }
-    }
-}
-
-impl<T: ?Sized + WeakRefcounted> Clone for WeakPtr<T> {
-    fn clone(&self) -> Self {
-        unsafe {
-            T::weak_addref(self.ptr.as_ptr());
-        }
-
-        WeakPtr {
-            ptr: self.ptr,
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<T: ?Sized + WeakRefcounted> Drop for WeakPtr<T> {
-    fn drop(&mut self) {
-        unsafe {
-            T::weak_release(self.ptr.as_ptr());
-        }
-    }
-}
-
-impl<T: ?Sized + WeakRefcounted> fmt::Debug for WeakPtr<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "(WeakPtr)")
-    }
-}
-
-unsafe impl<T: ?Sized + WeakRefcounted + Sync + Send> Send for WeakPtr<T> {}
-unsafe impl<T: ?Sized + WeakRefcounted + Sync + Send> Sync for WeakPtr<T> {}
 
 /// An invasively reference counted type.
 ///
@@ -321,67 +174,184 @@ unsafe impl<T: ?Sized + WeakRefcounted + Sync + Send> Sync for WeakPtr<T> {}
 ///
 ///  * `Refcounted` objects are always heap-allocated
 ///  * Only shared references may exist to `Refcounted` objects
-///  * If the `addref` method has been called more times than the `release`
-///    method, the object must not be dropped.
-///
-/// ## Trait Objects
-///
-/// Unfortunately, the `Refcounted` interface is currently not object-safe, as
-/// the `release` method takes a `this: *const Self`. This may change if Rust
-/// adds support for raw pointer receivers on unsafe trait methods.
-///
-/// The `release` method cannot take `&self`, as it may be freed or become
-/// partially invalid during the execution of the method, which would violate
-/// reference type guarantees.
 pub unsafe trait Refcounted {
-    /// Increment the strong reference count for this object.
-    ///
-    /// Prefer managing the lifecycle of `Refcounted` objects with [`RefPtr`]
-    /// over manually calling these methods.
-    ///
-    /// This must only be called while the strong reference count is at least 1.
-    /// If only weak references only exist for this object, the `upgrade` method
-    /// must be used instead.
-    unsafe fn addref(&self);
-
-    /// Decrement the strong reference count for this object.
-    ///
-    /// Prefer managing the lifecycle of `Refcounted` objects with [`RefPtr`]
-    /// over manually calling these methods.
-    unsafe fn release(this: *const Self);
-
-    /// Gets the number of strong references to this allocation.
-    unsafe fn strong_count(this: *const Self) -> usize;
+    type Rc: Refcount;
 }
 
-/// An invasively reference counted type supporting weak references.
-pub unsafe trait WeakRefcounted: Refcounted {
-    /// Increment the weak reference count of this object.
-    ///
-    /// Prefer managing the lifecycle of `WeakRefcounted` objects with
-    /// [`WeakPtr`] over manually calling these methods.
-    unsafe fn weak_addref(this: *const Self);
+pub struct RefPtr<T: ?Sized + Refcounted> {
+    ptr: NonNull<Inner<T>>,
+    _marker: PhantomData<T>,
+}
 
-    /// Decrement the weak reference count of this object.
-    ///
-    /// Prefer managing the lifecycle of `WeakRefcounted` objects with
-    /// [`WeakPtr`] over manually calling these methods.
-    unsafe fn weak_release(this: *const Self);
+impl<T: ?Sized + Refcounted> RefPtr<T> {
+    pub fn new(val: &T) -> RefPtr<T> {
+        unsafe {
+            let ptr = Inner::cast(val as *const T as *mut T);
+            T::Rc::inc_strong(ptr);
+            RefPtr::from_inner(ptr)
+        }
+    }
 
-    /// Attempt to obtain a new strong reference to this object.
-    ///
-    /// Prefer managing the lifecycle of `WeakRefcounted` objects with
-    /// [`WeakPtr`] over manually calling these methods.
-    ///
-    /// This method will return `UpgradeAction::Upgrade` if the strong reference
-    /// count was successfully incremented.
-    unsafe fn upgrade(this: *const Self) -> control::UpgradeAction;
+    pub unsafe fn from_raw(val: *const T) -> RefPtr<T> {
+        RefPtr::from_inner(Inner::cast(val as *mut T))
+    }
+
+    pub fn into_raw(this: Self) -> *const T {
+        let ptr = this.deref() as *const T;
+        mem::forget(this);
+        ptr
+    }
+
+    // /// Gets the number of strong references to this allocation.
+    // pub fn strong_count(this: &T) -> usize {
+    //     unsafe { self.refcnt().strong_count() }
+    // }
+
+    // /// Gets the number of weak references to this allocation.
+    // ///
+    // /// If there are no remaining strong references, this will
+    // /// return `0`.
+    // pub fn weak_count(this: &T) -> usize
+    // where
+    //     T::Rc: WeakRefcount,
+    // {
+    //     unsafe { this.refcnt().weak_count() }
+    // }
+
+    unsafe fn from_inner(ptr: *mut Inner<T>) -> RefPtr<T> {
+        RefPtr {
+            ptr: NonNull::new_unchecked(ptr),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T: ?Sized + Refcounted> Deref for RefPtr<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        unsafe { &(*self.ptr.as_ptr()).data }
+    }
+}
+
+impl<T: ?Sized + Refcounted> Clone for RefPtr<T> {
+    fn clone(&self) -> Self {
+        unsafe {
+            T::Rc::inc_strong(self.ptr.as_ptr());
+            RefPtr::from_inner(self.ptr.as_ptr())
+        }
+    }
+}
+
+impl<T: ?Sized + Refcounted> Drop for RefPtr<T> {
+    fn drop(&mut self) {
+        unsafe { T::Rc::dec_strong(self.ptr.as_ptr()) }
+    }
+}
+
+unsafe impl<T: ?Sized + Refcounted + Sync + Send> Send for RefPtr<T> {}
+unsafe impl<T: ?Sized + Refcounted + Sync + Send> Sync for RefPtr<T> {}
+
+/// Weak reference to a [`WeakRefcounted`] object.
+pub struct WeakPtr<T: ?Sized>
+where
+    T: Refcounted,
+    T::Rc: WeakRefcount,
+{
+    ptr: NonNull<Inner<T>>,
+    _marker: PhantomData<T>,
+}
+
+impl<T: ?Sized> WeakPtr<T>
+where
+    T: Refcounted,
+    T::Rc: WeakRefcount,
+{
+    /// Obtain a new weak reference to a refcounted object.
+    pub fn new(val: &T) -> WeakPtr<T> {
+        unsafe {
+            let ptr = Inner::cast(val as *const T as *mut T);
+            T::Rc::inc_weak(ptr);
+            WeakPtr::from_inner(ptr)
+        }
+    }
+
+    /// Attempt to upgrade this weak reference into a strong reference,
+    /// returning it.
+    pub fn upgrade(&self) -> Option<RefPtr<T>> {
+        unsafe {
+            match T::Rc::upgrade(self.ptr.as_ptr()) {
+                UpgradeAction::Upgrade => Some(RefPtr::from_inner(self.ptr.as_ptr())),
+                UpgradeAction::None => None,
+            }
+        }
+    }
+
+    /// Gets the number of strong references to this allocation.
+    pub fn strong_count(&self) -> usize {
+        unsafe { T::Rc::strong_count(self.ptr.as_ptr()) }
+    }
 
     /// Gets the number of weak references to this allocation.
     ///
     /// If there are no remaining strong references, this will
     /// return `0`.
-    unsafe fn weak_count(this: *const Self) -> usize;
+    pub fn weak_count(&self) -> usize {
+        unsafe { T::Rc::weak_count(self.ptr.as_ptr()) }
+    }
+
+    unsafe fn from_inner(ptr: *mut Inner<T>) -> WeakPtr<T> {
+        WeakPtr {
+            ptr: NonNull::new_unchecked(ptr),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T: ?Sized> Clone for WeakPtr<T>
+where
+    T: Refcounted,
+    T::Rc: WeakRefcount,
+{
+    fn clone(&self) -> Self {
+        unsafe {
+            T::Rc::inc_weak(self.ptr.as_ptr());
+            WeakPtr::from_inner(self.ptr.as_ptr())
+        }
+    }
+}
+
+impl<T: ?Sized> Drop for WeakPtr<T>
+where
+    T: Refcounted,
+    T::Rc: WeakRefcount,
+{
+    fn drop(&mut self) {
+        unsafe { T::Rc::dec_weak(self.ptr.as_ptr()) }
+    }
+}
+
+impl<T: ?Sized> fmt::Debug for WeakPtr<T>
+where
+    T: Refcounted,
+    T::Rc: WeakRefcount,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "(WeakPtr)")
+    }
+}
+
+unsafe impl<T: ?Sized> Send for WeakPtr<T>
+where
+    T: Refcounted + Send + Sync,
+    T::Rc: WeakRefcount,
+{
+}
+unsafe impl<T: ?Sized> Sync for WeakPtr<T>
+where
+    T: Refcounted + Send + Sync,
+    T::Rc: WeakRefcount,
+{
 }
 
 // Trait impls for `RefPtr<T>`
@@ -448,18 +418,6 @@ impl<T: ?Sized + Refcounted> From<&T> for RefPtr<T> {
     }
 }
 
-// Not public API.
-#[doc(hidden)]
-pub mod __rt {
-    use crate::{RefPtr, Refcounted};
-    use alloc::boxed::Box;
-    pub use core::mem::ManuallyDrop;
-
-    pub unsafe fn alloc<T: Refcounted>(value: ManuallyDrop<T>) -> RefPtr<T> {
-        RefPtr::from_raw(Box::into_raw(Box::new(value)) as *mut T)
-    }
-}
-
 /// Allocate a new instance of a [`Refcounted`] struct using a struct literal.
 ///
 /// Returns a `RefPtr<T>` strong reference to the newly allocated struct.
@@ -478,7 +436,7 @@ macro_rules! make_refptr {
     ($($seg:ident $(::<$($t:ty),*>)?)::+ { $($f:tt)* }) => {
         {
             let value = $crate::__rt::ManuallyDrop::new($($seg $(::<$($t),*>)?)::+ {
-                refcnt: unsafe { $crate::control::ControlBlock::new() },
+                _refcnt_marker: unsafe { $crate::__rt::PhantomRefcnt::new() },
                 $($f)*
             });
 

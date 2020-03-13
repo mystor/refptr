@@ -79,29 +79,31 @@ fn parse_config(args: AttributeArgs) -> Result<Config, Error> {
 fn refcounted_impl(args: AttributeArgs, mut item: DeriveInput) -> Result<TokenStream, Error> {
     let cfg = parse_config(args)?;
 
-    let name = item.ident.clone();
-    let rc_field_ty: Type = match (cfg.rc_kind, cfg.weak_kind) {
-        (RcKind::Nonatomic, WeakKind::NonWeak) => parse_quote!(::refptr::control::Refcnt<Self>),
-        (RcKind::Atomic, WeakKind::NonWeak) => parse_quote!(::refptr::control::AtomicRefcnt<Self>),
-        (RcKind::Nonatomic, WeakKind::Weak) => parse_quote!(::refptr::control::RefcntWeak<Self>),
-        (RcKind::Atomic, WeakKind::Weak) => parse_quote!(::refptr::control::AtomicRefcntWeak<Self>),
+    // FIXME: Handle `finalize`.
+    let rc_ty = match (cfg.rc_kind, cfg.weak_kind) {
+        (RcKind::Nonatomic, WeakKind::NonWeak) => quote!(Refcnt),
+        (RcKind::Atomic, WeakKind::NonWeak) => quote!(AtomicRefcnt),
+        (RcKind::Nonatomic, WeakKind::Weak) => quote!(RefcntWeak),
+        (RcKind::Atomic, WeakKind::Weak) => quote!(AtomicRefcntWeak),
     };
 
     // Add our refcnt field, and extract the original fields
-    let orig_fields;
     match &mut item.data {
         Data::Struct(DataStruct {
             fields: Fields::Named(fields),
             ..
         }) => {
-            orig_fields = fields.named.clone();
+            let ty: Type = match cfg.rc_kind {
+                RcKind::Atomic => parse_quote!(::refptr::__rt::PhantomAtomicRefcnt<Self>),
+                RcKind::Nonatomic => parse_quote!(::refptr::__rt::PhantomLocalRefcnt<Self>),
+            };
 
             let rc_field = Field {
                 attrs: Vec::new(),
                 vis: Visibility::Inherited,
-                ident: parse_quote!(refcnt),
-                colon_token: parse_quote!(:),
-                ty: rc_field_ty.clone(),
+                ident: parse_quote!(_refcnt_marker),
+                colon_token: Default::default(),
+                ty,
             };
             fields.named.insert(0, rc_field);
         }
@@ -111,92 +113,25 @@ fn refcounted_impl(args: AttributeArgs, mut item: DeriveInput) -> Result<TokenSt
         ),
     }
 
+    let ident = &item.ident;
     let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
-
-    // drop_in_place each non-added field in the struct.
-    let drop_each_field = orig_fields.iter().map(|field| {
-        let name = &field.ident;
-        quote! {
-            ::std::ptr::drop_in_place(&mut (*this).#name);
-        }
-    });
-    let drop_fields = quote!(|| {
-        let this = this as *mut Self;
-        #(#drop_each_field)*
-    });
-
-    let release = if cfg.has_finalize {
-        quote! {
-            (*this).refcnt.dec_strong_finalize(#drop_fields, || {
-                let _: fn (this: &Self) = Self::finalize; // Ensure the signature is correct
-                Self::finalize(&*this);
-            })
-        }
-    } else {
-        quote! {
-            (*this).refcnt.dec_strong(#drop_fields)
-        }
-    };
-
     let impl_refcounted = quote! {
-        unsafe impl #impl_generics ::refptr::Refcounted for #name #ty_generics #where_clause {
-            #[inline]
-            unsafe fn addref(&self) {
-                self.refcnt.inc_strong()
-            }
-
-            #[inline]
-            unsafe fn release(this: *const Self) {
-                #release.take_action(this)
-            }
-
-            unsafe fn strong_count(this: *const Self) -> usize {
-                (*this).refcnt.strong_count()
-            }
+        unsafe impl #impl_generics ::refptr::Refcounted for #ident #ty_generics #where_clause {
+            type Rc = ::refptr::refcnt::#rc_ty;
         }
-    };
-
-    let impl_weak = if cfg.weak_kind == WeakKind::Weak {
-        quote! {
-            unsafe impl #impl_generics ::refptr::WeakRefcounted for #name #ty_generics #where_clause {
-                #[inline]
-                unsafe fn weak_addref(this: *const Self) {
-                    (*this).refcnt.inc_weak()
-                }
-
-                #[inline]
-                unsafe fn weak_release(this: *const Self) {
-                    (*this).refcnt.dec_weak().take_action(this)
-                }
-
-                #[inline]
-                unsafe fn upgrade(this: *const Self) -> ::refptr::control::UpgradeAction {
-                    (*this).refcnt.upgrade()
-                }
-
-                unsafe fn weak_count(this: *const Self) -> usize {
-                    (*this).refcnt.weak_count()
-                }
-            }
-        }
-    } else {
-        quote!()
     };
 
     // Prevent any other implementations of `Drop`, as they can be unsound (due
     // to being able to create a `RefPtr` to a dropped struct).
     let impl_drop = quote! {
-        impl #impl_generics Drop for #name #ty_generics #where_clause {
-            fn drop(&mut self) {
-                unreachable!("Drop never called on Refcounted types");
-            }
+        impl #impl_generics Drop for #ident #ty_generics #where_clause {
+            fn drop(&mut self) { /* no-op */ }
         }
     };
 
     Ok(quote! {
         #item
         #impl_refcounted
-        #impl_weak
         #impl_drop
     })
 }
