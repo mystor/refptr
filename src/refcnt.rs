@@ -105,9 +105,9 @@ pub unsafe trait WeakRefcount: Refcount {
 
     /// Called to attempt to obtain a new strong reference to an object.
     ///
-    /// This method will return `UpgradeAction::Upgrade` if the strong reference
-    /// count was successfully incremented, and `UpgradeAction::None` otherwise.
-    unsafe fn upgrade<T: ?Sized>(ptr: *const Inner<T>) -> UpgradeAction
+    /// This method will return `true` if the strong reference
+    /// count was successfully incremented, and `false` otherwise.
+    unsafe fn upgrade<T: ?Sized>(ptr: *const Inner<T>) -> bool
     where
         T: Refcounted<Rc = Self>;
 
@@ -145,31 +145,6 @@ fn abort() -> ! {
     panic!("aborting due to excessively large reference count");
 }
 
-/// Action returned by the `upgrade` method on control blocks.
-#[must_use]
-#[derive(Eq, PartialEq, Debug)]
-pub enum UpgradeAction {
-    /// The caller should take no action.
-    None,
-
-    /// The caller has acquired a strong reference to the object's backing
-    /// memory.
-    Upgrade,
-}
-
-/// Action returned by the `dec_strong` and `dec_weak` methods on control
-/// blocks.
-#[must_use]
-#[derive(Eq, PartialEq, Debug)]
-enum FreeAction {
-    /// The caller should take no action.
-    None,
-
-    /// The caller should free the object's backing memory without invoking
-    /// `Drop`.
-    FreeMemory,
-}
-
 macro_rules! dec_strong_impl {
     () => {
         unsafe fn dec_strong<T: ?Sized>(ptr: *const Inner<T>)
@@ -180,9 +155,8 @@ macro_rules! dec_strong_impl {
                 ManuallyDrop::drop(&mut (*(ptr as *mut Inner<T>)).data);
             };
 
-            match (*ptr).refcnt.inner.dec_strong(drop_fields) {
-                FreeAction::FreeMemory => drop(Box::from_raw(ptr as *mut Inner<T>)),
-                FreeAction::None => (),
+            if (*ptr).refcnt.inner.dec_strong(drop_fields) {
+                drop(Box::from_raw(ptr as *mut Inner<T>));
             }
         }
     };
@@ -199,13 +173,12 @@ macro_rules! dec_strong_impl {
                 finalize_fn((&(*ptr).data) as *const _ as *const u8);
             };
 
-            match (*ptr)
+            if (*ptr)
                 .refcnt
                 .inner
                 .dec_strong_finalize(drop_fields, finalize)
             {
-                FreeAction::FreeMemory => drop(Box::from_raw(ptr as *mut Inner<T>)),
-                FreeAction::None => (),
+                drop(Box::from_raw(ptr as *mut Inner<T>));
             }
         }
     };
@@ -264,13 +237,12 @@ macro_rules! decl_refcnt {
                 where
                     T: Refcounted<Rc = Self>,
                 {
-                    match (*ptr).refcnt.inner.dec_weak() {
-                        FreeAction::FreeMemory => drop(Box::from_raw(ptr as *mut Inner<T>)),
-                        FreeAction::None => (),
+                    if (*ptr).refcnt.inner.dec_weak() {
+                        drop(Box::from_raw(ptr as *mut Inner<T>));
                     }
                 }
 
-                unsafe fn upgrade<T: ?Sized>(ptr: *const Inner<T>) -> UpgradeAction
+                unsafe fn upgrade<T: ?Sized>(ptr: *const Inner<T>) -> bool
                 where
                     T: Refcounted<Rc = Self>,
                 {
@@ -447,11 +419,11 @@ impl<T: IncDecCount, W: IncDecCount> RefcntImpl<T, W> {
         self.strong.inc();
     }
 
-    unsafe fn dec_strong(&self, drop_fields: impl FnOnce()) -> FreeAction {
+    unsafe fn dec_strong(&self, drop_fields: impl FnOnce()) -> bool {
         // If we've decreased to a non-zero value, we can immediately return.
         let old_count = self.strong.dec();
         if old_count != 1 {
-            return FreeAction::None;
+            return false;
         }
 
         // We're about to drop the object in question due to the count reaching
@@ -474,12 +446,8 @@ impl<T: IncDecCount, W: IncDecCount> RefcntImpl<T, W> {
         self.weak.inc();
     }
 
-    unsafe fn dec_weak(&self) -> FreeAction {
-        if self.weak.dec() == 1 {
-            FreeAction::FreeMemory
-        } else {
-            FreeAction::None
-        }
+    unsafe fn dec_weak(&self) -> bool {
+        self.weak.dec() == 1
     }
 }
 
@@ -489,12 +457,12 @@ impl RefcntImpl<AtomicUsize, ()> {
         &self,
         drop_fields: impl FnOnce(),
         finalize: impl FnOnce(),
-    ) -> FreeAction {
+    ) -> bool {
         // As there are no weak pointers, it's OK to decrement our refcount to
         // `0`, so long as we increment it back to `1` before finalization.
         let old_count = self.strong.fetch_sub(1, Ordering::Release);
         if old_count != 1 {
-            return FreeAction::None;
+            return false;
         }
 
         // We are the last remaining reference to the object. Stabilize the
@@ -522,7 +490,7 @@ impl RefcntImpl<AtomicUsize, AtomicUsize> {
     /// incrementing the strong reference count. If this method returns `true`,
     /// the upgrade was successful, and if it returns `false`, the strong
     /// reference count has reached `0`, and the object has been destroyed.
-    unsafe fn upgrade(&self) -> UpgradeAction {
+    unsafe fn upgrade(&self) -> bool {
         // We use a CAS loop to increment the strong count instead of a
         // fetch_add because once the count hits 0 it must never be above 0.
 
@@ -543,18 +511,18 @@ impl RefcntImpl<AtomicUsize, AtomicUsize> {
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return UpgradeAction::Upgrade,
+                Ok(_) => return true,
                 Err(actual) => prev = actual,
             }
         }
-        UpgradeAction::None
+        false
     }
 
     unsafe fn dec_strong_finalize(
         &self,
         drop_fields: impl FnOnce(),
         finalize: impl FnOnce(),
-    ) -> FreeAction {
+    ) -> bool {
         // We cannot drop our strong refcount to `0` until after finalization,
         // as otherwise `upgrade` could observe a `0` strong refcount when the
         // object is not yet dead.
@@ -568,7 +536,7 @@ impl RefcntImpl<AtomicUsize, AtomicUsize> {
                 Ordering::Release,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return FreeAction::None,
+                Ok(_) => return false,
                 Err(actual) => old_count = actual,
             }
         }
@@ -603,10 +571,10 @@ where
     /// incrementing the strong reference count. If this method returns `true`,
     /// the upgrade was successful, and if it returns `false`, the strong
     /// reference count has reached `0`, and has been destroyed.
-    unsafe fn upgrade(&self) -> UpgradeAction {
+    unsafe fn upgrade(&self) -> bool {
         let prev_value = self.strong.get();
         if prev_value == 0 {
-            return UpgradeAction::None;
+            return false;
         }
 
         // Guard against massive reference counts by aborting if it would
@@ -616,18 +584,18 @@ where
         }
 
         self.strong.set(prev_value + 1);
-        UpgradeAction::Upgrade
+        true
     }
 
     unsafe fn dec_strong_finalize(
         &self,
         drop_fields: impl FnOnce(),
         finalize: impl FnOnce(),
-    ) -> FreeAction {
+    ) -> bool {
         let prev_value = self.strong.get();
         if prev_value != 1 {
             self.strong.set(prev_value - 1);
-            return FreeAction::None;
+            return false;
         }
 
         // We are the last remaining reference, but haven't decremented it yet.

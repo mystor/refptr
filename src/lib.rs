@@ -153,7 +153,7 @@ use core::ops::Deref;
 use core::ptr::NonNull;
 
 pub mod refcnt;
-use refcnt::{Inner, Refcount, UpgradeAction, WeakRefcount};
+use refcnt::{Inner, Refcount, WeakRefcount};
 
 // Not public API.
 #[doc(hidden)]
@@ -294,9 +294,10 @@ where
     /// returning it.
     pub fn upgrade(&self) -> Option<RefPtr<T>> {
         unsafe {
-            match T::Rc::upgrade(self.ptr.as_ptr()) {
-                UpgradeAction::Upgrade => Some(RefPtr::from_inner(self.ptr.as_ptr())),
-                UpgradeAction::None => None,
+            if T::Rc::upgrade(self.ptr.as_ptr()) {
+                Some(RefPtr::from_inner(self.ptr.as_ptr()))
+            } else {
+                None
             }
         }
     }
