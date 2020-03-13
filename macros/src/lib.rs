@@ -16,7 +16,7 @@ macro_rules! fail {
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
 enum RcKind {
     Atomic,
-    Nonatomic,
+    Local,
 }
 
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
@@ -25,17 +25,23 @@ enum WeakKind {
     Weak,
 }
 
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+enum FinalizeKind {
+    Finalize,
+    Pod,
+}
+
 #[derive(Debug)]
 struct Config {
     rc_kind: RcKind,
     weak_kind: WeakKind,
-    has_finalize: bool,
+    finalize_kind: FinalizeKind,
 }
 
 fn parse_config(args: AttributeArgs) -> Result<Config, Error> {
     let mut rc_kind: Option<RcKind> = None;
     let mut weak_kind = WeakKind::NonWeak;
-    let mut has_finalize = false;
+    let mut finalize_kind = FinalizeKind::Pod;
 
     for arg in args {
         use syn::{Meta::*, NestedMeta::*};
@@ -46,11 +52,11 @@ fn parse_config(args: AttributeArgs) -> Result<Config, Error> {
                 }
                 rc_kind = Some(RcKind::Atomic);
             }
-            Meta(Path(path)) if path.is_ident("nonatomic") => {
+            Meta(Path(path)) if path.is_ident("local") => {
                 if rc_kind.is_some() {
                     fail!(path, "duplicate atomicity argument");
                 }
-                rc_kind = Some(RcKind::Nonatomic);
+                rc_kind = Some(RcKind::Local);
             }
             Meta(Path(path)) if path.is_ident("weak") => {
                 if weak_kind == WeakKind::Weak {
@@ -59,32 +65,36 @@ fn parse_config(args: AttributeArgs) -> Result<Config, Error> {
                 weak_kind = WeakKind::Weak;
             }
             Meta(Path(path)) if path.is_ident("finalize") => {
-                if has_finalize {
+                if finalize_kind == FinalizeKind::Finalize {
                     fail!(path, "duplicate finalize argument");
                 }
-                has_finalize = true;
+                finalize_kind = FinalizeKind::Finalize;
             }
             meta => fail!(meta, "unexpected refcounted argument"),
         }
     }
 
-    let rc_kind = rc_kind.unwrap_or(RcKind::Nonatomic);
+    let rc_kind = rc_kind.unwrap_or(RcKind::Local);
     Ok(Config {
         rc_kind,
         weak_kind,
-        has_finalize,
+        finalize_kind,
     })
 }
 
 fn refcounted_impl(args: AttributeArgs, mut item: DeriveInput) -> Result<TokenStream, Error> {
     let cfg = parse_config(args)?;
 
-    // FIXME: Handle `finalize`.
-    let rc_ty = match (cfg.rc_kind, cfg.weak_kind) {
-        (RcKind::Nonatomic, WeakKind::NonWeak) => quote!(Refcnt),
-        (RcKind::Atomic, WeakKind::NonWeak) => quote!(AtomicRefcnt),
-        (RcKind::Nonatomic, WeakKind::Weak) => quote!(RefcntWeak),
-        (RcKind::Atomic, WeakKind::Weak) => quote!(AtomicRefcntWeak),
+    use {FinalizeKind::*, RcKind::*, WeakKind::*};
+    let rc_ty = match (cfg.rc_kind, cfg.weak_kind, cfg.finalize_kind) {
+        (Local, NonWeak, Pod) => quote!(Local),
+        (Atomic, NonWeak, Pod) => quote!(Atomic),
+        (Local, Weak, Pod) => quote!(LocalWeak),
+        (Atomic, Weak, Pod) => quote!(AtomicWeak),
+        (Local, NonWeak, Finalize) => quote!(LocalFinalize),
+        (Atomic, NonWeak, Finalize) => quote!(AtomicFinalize),
+        (Local, Weak, Finalize) => quote!(LocalWeakFinalize),
+        (Atomic, Weak, Finalize) => quote!(AtomicWeakFinalize),
     };
 
     // Add our refcnt field, and extract the original fields
@@ -95,7 +105,7 @@ fn refcounted_impl(args: AttributeArgs, mut item: DeriveInput) -> Result<TokenSt
         }) => {
             let ty: Type = match cfg.rc_kind {
                 RcKind::Atomic => parse_quote!(::refptr::__rt::PhantomAtomicRefcnt<Self>),
-                RcKind::Nonatomic => parse_quote!(::refptr::__rt::PhantomLocalRefcnt<Self>),
+                RcKind::Local => parse_quote!(::refptr::__rt::PhantomLocalRefcnt<Self>),
             };
 
             let rc_field = Field {
@@ -115,9 +125,28 @@ fn refcounted_impl(args: AttributeArgs, mut item: DeriveInput) -> Result<TokenSt
 
     let ident = &item.ident;
     let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
+
+    let metadata_func = match cfg.finalize_kind {
+        Pod => quote! {
+            unsafe fn refcount_metadata(&self) { }
+        },
+        Finalize => quote! {
+            unsafe fn refcount_metadata(&self) -> unsafe fn (*const u8) {
+                unsafe fn finalize_helper #impl_generics (this: *const u8) #where_clause {
+                    let _assert_finalize_type: fn (&#ident #ty_generics) =
+                        <#ident #ty_generics>::finalize;
+                    <#ident #ty_generics>::finalize(&*(this as *const #ident #ty_generics));
+                }
+                finalize_helper #ty_generics
+            }
+        },
+    };
+
     let impl_refcounted = quote! {
         unsafe impl #impl_generics ::refptr::Refcounted for #ident #ty_generics #where_clause {
             type Rc = ::refptr::refcnt::#rc_ty;
+
+            #metadata_func
         }
     };
 

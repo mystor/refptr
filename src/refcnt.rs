@@ -54,6 +54,9 @@ impl<T: ?Sized + Refcounted> Inner<T> {
 
 /// A reference count
 pub unsafe trait Refcount: Sized {
+    /// Metadata type which can be obtained from the underlying `Refcounted` object.
+    type Metadata;
+
     /// Construct a new instance of the refcount, initialized to a default value.
     unsafe fn new() -> Self;
 
@@ -189,7 +192,8 @@ macro_rules! dec_strong_impl {
                 ManuallyDrop::drop(&mut (*(ptr as *mut Inner<T>)).data);
             };
             let finalize = || {
-                panic!("finalize not implemented properly yet");
+                let finalize_fn = (*ptr).data.refcount_metadata();
+                finalize_fn((&(*ptr).data) as *const _ as *const u8);
             };
 
             match (*ptr)
@@ -204,7 +208,12 @@ macro_rules! dec_strong_impl {
     };
 }
 
-macro_rules! decl_control {
+macro_rules! metadata_type {
+    () => { () };
+    (finalize) => { unsafe fn(*const u8) };
+}
+
+macro_rules! decl_refcnt {
     ($name:ident, [$strong:ty $(, $weak:ty)?] $(, $finalize:ident)?) => {
         /// Reference counting control block used by the `#[refcounted]`
         /// attribute.
@@ -213,6 +222,8 @@ macro_rules! decl_control {
         }
 
         unsafe impl Refcount for $name {
+            type Metadata = metadata_type!($($finalize)?);
+
             unsafe fn new() -> Self {
                 $name {
                     inner: RefcntImpl::new(),
@@ -288,23 +299,19 @@ macro_rules! decl_control {
     }
 }
 
-decl_control!(Refcnt, [Cell<usize>]);
-decl_control!(RefcntWeak, [Cell<usize>, Cell<usize>]);
+decl_refcnt!(Local, [Cell<usize>]);
+decl_refcnt!(LocalWeak, [Cell<usize>, Cell<usize>]);
 #[cfg(feature = "atomic")]
-decl_control!(AtomicRefcnt, [AtomicUsize]);
+decl_refcnt!(Atomic, [AtomicUsize]);
 #[cfg(feature = "atomic")]
-decl_control!(AtomicRefcntWeak, [AtomicUsize, AtomicUsize]);
+decl_refcnt!(AtomicWeak, [AtomicUsize, AtomicUsize]);
 
-decl_control!(RefcntFinalize, [Cell<usize>], finalize);
-decl_control!(RefcntWeakFinalize, [Cell<usize>, Cell<usize>], finalize);
+decl_refcnt!(LocalFinalize, [Cell<usize>], finalize);
+decl_refcnt!(LocalWeakFinalize, [Cell<usize>, Cell<usize>], finalize);
 #[cfg(feature = "atomic")]
-decl_control!(AtomicRefcntFinalize, [AtomicUsize], finalize);
+decl_refcnt!(AtomicFinalize, [AtomicUsize], finalize);
 #[cfg(feature = "atomic")]
-decl_control!(
-    AtomicRefcntWeakFinalize,
-    [AtomicUsize, AtomicUsize],
-    finalize
-);
+decl_refcnt!(AtomicWeakFinalize, [AtomicUsize, AtomicUsize], finalize);
 
 /// Internal trait for abstracting over `AtomicUsize`, `Cell<usize>`, and `()`.
 ///

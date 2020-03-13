@@ -12,7 +12,7 @@ struct MyAtomic {
     bbb: u32,
 }
 
-#[refcounted(nonatomic)]
+#[refcounted(local)]
 struct MyNonatomic {
     aaa: i32,
     bbb: u32,
@@ -24,7 +24,7 @@ struct MyAtomicWeak {
     bbb: u32,
 }
 
-#[refcounted(nonatomic, weak)]
+#[refcounted(local, weak)]
 struct MyNonatomicWeak {
     aaa: i32,
     bbb: u32,

@@ -176,6 +176,12 @@ pub use refptr_macros::refcounted;
 ///  * Only shared references may exist to `Refcounted` objects
 pub unsafe trait Refcounted {
     type Rc: Refcount;
+
+    /// Metadata used internally by `Refcount` implementations.
+    ///
+    /// This metadata can be used to implement dynamic extensions to the
+    /// refcount type, such as `finalize` support or RTTI.
+    unsafe fn refcount_metadata(&self) -> <Self::Rc as Refcount>::Metadata;
 }
 
 pub struct RefPtr<T: ?Sized + Refcounted> {
