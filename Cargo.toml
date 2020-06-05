@@ -1,6 +1,6 @@
 [package]
 name = "refptr"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Nika Layzell <nika@thelayzells.com>"]
 edition = "2018"
 
@@ -19,4 +19,4 @@ atomic = []
 members = ["macros"]
 
 [dependencies]
-refptr-macros = { version = "0.1.0", path = "macros" }
+refptr-macros = { version = "0.2.0", path = "macros" }
